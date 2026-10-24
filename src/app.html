@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="%sveltekit.assets%/favicon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Allodium</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600&family=DM+Sans:wght@400;500&display=swap" rel="stylesheet" />
+    %sveltekit.head%
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body {
+        height: 100%;
+        overflow: hidden;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      input, textarea {
+        user-select: text;
+        -webkit-user-select: text;
+      }
+      /* No browser focus ring anywhere — this is a mouse/shortcut-driven desktop
+         UI, and the ring shows up on whatever was last clicked as soon as a key
+         (e.g. Space for play/pause) is pressed. Component-level outlines used
+         as real visuals (playing-step highlights etc.) are unaffected: they
+         aren't :focus rules and have higher specificity anyway. */
+      :focus, :focus-visible { outline: none; }
+      #svelte { height: 100%; }
+
+      :root {
+        --sidebar-bg:          #1a1c25;
+        --sidebar-text:        #8a90a6;
+        --sidebar-hover:       #232633;
+        --sidebar-active-bg:   #2c3040;
+        --sidebar-active-text: #e4e6ee;
+        --sidebar-border:      #333747;
+        --explorer-bg:         #20232d;
+        --explorer-border:     #333747;
+        --main-bg:             #1f222b;
+        --main-text:           #d4d7e0;
+        --main-text-muted:     #7e849a;
+        --main-muted:          #7e849a;
+        --main-border:         #333747;
+        /* Editor cursors (see src/lib/dragCursor.ts for the drag override).
+           Brush = Piano Roll draw tool, eraser = delete tool; hotspots at
+           the tip. Extendable edges use col-resize (as the Channel Rack's
+           name-column handle), moving uses move / ew-resize. */
+        --cursor-brush:  url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M19.2 1.9l2.9 2.9-9.3 9.3-2.9-2.9z' fill='%23d9dade' stroke='%2315171e' stroke-width='1.2' stroke-linejoin='round'/%3E%3Cpath d='M9.3 12l2.7 2.7c-.5 3.3-3.4 5.8-7 6.4l-2.6.6.5-2.6c.6-3.6 3.1-6.6 6.4-7.1z' fill='%23e6b07f' stroke='%2315171e' stroke-width='1.2' stroke-linejoin='round'/%3E%3C/svg%3E") 3 21, crosshair;
+        --cursor-eraser: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M14 2.8l7.2 7.2-9.5 9.5H7.4l-4.6-4.6z' fill='%23d9dade' stroke='%2315171e' stroke-width='1.2' stroke-linejoin='round'/%3E%3Cpath d='M2.8 14.9l4.6 4.6h4.3l1.6-1.6-7-7z' fill='%23f08484' stroke='%2315171e' stroke-width='1.2' stroke-linejoin='round'/%3E%3Cpath d='M11.5 21.2h9' stroke='%2315171e' stroke-width='2.4' stroke-linecap='round'/%3E%3Cpath d='M11.5 21.2h9' stroke='%23d9dade' stroke-width='1' stroke-linecap='round'/%3E%3C/svg%3E") 4 19, not-allowed;
+        --accent:              #e6b07f;
+        --accent-hover:        #efc199;
+        --accent-text:         #2b2019; /* text on an accent-colored fill */
+        --btn-bg:              #272a36;
+        --btn-border:          #363a4a;
+        --btn-text:            #b9bdcc;
+        --btn-hover:           #303443;
+        --search-bg:           #232631;
+        --shadow-sm:           0 1px 3px rgba(8, 10, 20, 0.35);
+        --toolbar-green-bg:    #2b2e3d; /* legacy name — now the slate menu-section fill */
+      }
+
+      /* While a drag is in progress (dragCursor.ts adds the class), its
+         cursor wins everywhere, even off the element that started it. */
+      html.drag-cursor, html.drag-cursor * { cursor: var(--drag-cursor) !important; }
+    </style>
+  </head>
+  <body data-sveltekit-preload-data="hover">
+    <script>
+      // Suppress the webview's native right-click menu (Inspect Element,
+      // Reload, …) everywhere. Capture phase, so it applies even where a
+      // component's own contextmenu handler calls stopPropagation(); those
+      // handlers (right-click delete, knob reset, custom menus) still run.
+      // Devtools stay reachable in dev builds via Ctrl+Shift+I.
+      document.addEventListener('contextmenu', (e) => e.preventDefault(), { capture: true });
+    </script>
+    <div style="display: contents">%sveltekit.body%</div>
+  </body>
+</html>
