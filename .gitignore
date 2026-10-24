@@ -13,5 +13,6 @@ data/projects
 clear-cache.sh
 .claude/
 *.xml
+.vscode/
 # Third-party sample content kept locally only — never commit
 data/samples/local_samples/
