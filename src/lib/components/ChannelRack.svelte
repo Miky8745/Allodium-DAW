@@ -1,10 +1,10 @@
 <script lang="ts">
+  import { applyDropToChannel } from '$lib/channelDrop';
   import Dial from './Dial.svelte';
   import ScrollField from './ScrollField.svelte';
   import ChannelRow from './ChannelRow.svelte';
   import FloatingWindow, { type WorkspaceBounds } from './FloatingWindow.svelte';
   import { playback } from '$lib/playbackStore.svelte';
-  import { audioEngine } from '$lib/audioEngine';
   import { channelStore } from '$lib/channelStore.svelte';
   import { portal } from '$lib/portal';
   import type { FileDropDetail, FileDragOverDetail } from '$lib/types';
@@ -147,14 +147,7 @@
 
   function insertChannelFromDrop(drop: FileDropDetail, index: number) {
     const ch = channelStore.addChannel(index);
-    if (drop.kind === 'file') {
-      ch.samplePath = drop.path;
-      ch.sampleFolder = null;
-    } else {
-      ch.sampleFolder = drop.path;
-      ch.samplePath = null;
-    }
-    audioEngine.preloadChannel(ch);
+    applyDropToChannel(ch, drop);
   }
 
   $effect(() => {
@@ -527,17 +520,7 @@
         activeStep={playback.currentStep}
         onSelect={(e) => handleSelect(i, e)}
         onStepChange={(step, active) => { channelStore.channels[i].steps[step] = active; }}
-        onSampleDrop={(drop) => {
-          const target = channelStore.channels[i];
-          if (drop.kind === 'file') {
-            target.samplePath = drop.path;
-            target.sampleFolder = null;
-          } else {
-            target.sampleFolder = drop.path;
-            target.samplePath = null;
-          }
-          audioEngine.preloadChannel(target);
-        }}
+        onSampleDrop={(drop) => applyDropToChannel(channelStore.channels[i], drop)}
         onOpenPianoRoll={() => onOpenPianoRoll(ch.id)}
         onDelete={() => handleDelete(ch.id)}
       />

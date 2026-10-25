@@ -12,6 +12,7 @@
   import ChannelRack from '$lib/components/ChannelRack.svelte';
   import PianoRoll from '$lib/components/PianoRoll.svelte';
   import Mixer from '$lib/components/mixer/Mixer.svelte';
+  import InstrumentWindow from '$lib/components/instrument/InstrumentWindow.svelte';
   import ProjectShortcuts from '$lib/components/ProjectShortcuts.svelte';
   import PreferencesModal from '$lib/components/preferences/PreferencesModal.svelte';
   import QwertyPiano from '$lib/components/midi/QwertyPiano.svelte';
@@ -224,6 +225,7 @@
     />
     <PianoRoll bind:show={showPianoRoll} {workspaceBounds} bind:showPianoRollOverview />
     <Mixer bind:show={showMixer} {workspaceBounds} />
+    <InstrumentWindow {workspaceBounds} />
   </div>
 {/if}
 

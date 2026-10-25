@@ -5,6 +5,10 @@
   import ColorWheel from './ColorWheel.svelte';
   import ChannelMidiOutMenu from './ChannelMidiOutMenu.svelte';
   import { formatChannelLabel } from '$lib/sampleName';
+  import { channelHasSound } from '$lib/instrument/channelSound';
+  import { channelPlugin } from '$lib/plugins/registry';
+  import SampleFieldMenu from './SampleFieldMenu.svelte';
+  import { auditionChannel } from '$lib/audition';
   import { channelStore } from '$lib/channelStore.svelte';
   import { channelLoopLength } from '$lib/channelLoop';
   import { formatPan } from '$lib/panFormat';
@@ -60,7 +64,30 @@
   });
 
   let sampleLabel = $derived(formatChannelLabel(channel));
-  let isEmpty = $derived(channel.samplePath === null && channel.sampleFolder === null);
+  let isEmpty = $derived(!channelHasSound(channel) && !channel.plugin);
+
+  // Sample field: its own right-click menu (plugins), separate from the
+  // row's menu. Double-click opens the assigned plugin, or the Piano Roll
+  // when there is none.
+  let sampleMenu = $state<{ x: number; y: number } | null>(null);
+
+  function openSampleMenu(e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation(); // keep the row's own menu from opening too
+    contextMenu = null;
+    sampleMenu = { x: e.clientX, y: e.clientY };
+  }
+
+  // Left press on the sample field plays the channel until release.
+  function onSampleMousedown(e: MouseEvent) {
+    if (e.button === 0) auditionChannel(channel);
+  }
+
+  function onSampleDblclick() {
+    const plugin = channelPlugin(channel);
+    if (plugin) plugin.open(channel.id);
+    else onOpenPianoRoll();
+  }
 
   // Mute dot: plain click toggles mute (unchanged); Ctrl+click toggles solo
   // instead — single-solo (channelStore.toggleSolo), so soloing a channel
@@ -102,6 +129,7 @@
     } else if (e.button === 0) {
       painting = true;
       onStepChange(i, true);
+      auditionChannel(channel); // only the clicked step, not ones painted after
     }
   }
 
@@ -244,9 +272,12 @@
     style="width:{nameColWidth}px; min-width:{nameColWidth}px; max-width:{nameColWidth}px; {channel.color ? `background:${channel.color};` : ''}"
     data-sample-drop
     bind:this={dropEl}
-    ondblclick={onOpenPianoRoll}
-    role="region"
-    aria-label="Sample drop zone"
+    onmousedown={onSampleMousedown}
+    ondblclick={onSampleDblclick}
+    oncontextmenu={openSampleMenu}
+    role="button"
+    tabindex="-1"
+    aria-label="Sample field (press to hear, double-click to open, right-click for plugins)"
   >
     <span class="sample-name" style={dropTextColor ? `color:${dropTextColor};` : ''}>{sampleLabel}</span>
   </div>
@@ -283,6 +314,10 @@
     {/if}
   </div>
 </div>
+
+{#if sampleMenu}
+  <SampleFieldMenu {channel} x={sampleMenu.x} y={sampleMenu.y} onClose={() => (sampleMenu = null)} />
+{/if}
 
 {#if contextMenu}
   <div class="ctx-root" use:portal>

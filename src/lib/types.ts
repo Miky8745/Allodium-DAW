@@ -1,3 +1,5 @@
+import type { InstrumentSettings } from './instrument/types';
+
 export interface FileNode {
   name: string;
   is_dir: boolean;
@@ -53,6 +55,12 @@ export interface ChannelData {
   color: string | null; // hex "#rrggbb" applied to the sample-name box only (right-click > Recolor/Recolor randomly); null = default styling
   midiOutPort: string | null; // MIDI output port key (right-click > MIDI out…); only piano-roll notes are sent. null = none
   midiOutChannel: number;     // 1-16
+  // Plugin assigned to the sample field (src/lib/plugins/registry.ts):
+  // '' = none, 'bloom'. Its label replaces the sample name by default.
+  plugin: string;
+  // Bloom's settings (envelope/filter/macros, optional SFZ preset) — see
+  // docs/instrument.md. Only used while plugin === 'bloom'.
+  instrument: InstrumentSettings;
 }
 
 // Payload carried by FileExplorer's `filedrop` custom event. `x`/`y` are the

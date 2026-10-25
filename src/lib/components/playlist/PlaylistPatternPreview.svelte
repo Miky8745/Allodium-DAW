@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { channelHasSound } from '$lib/instrument/channelSound';
   // Combined multi-channel thumbnail for a pattern placed on the Playlist —
   // flattens every channel's piano-roll notes into one MiniNoteRoll render
   // (its geometry is already channel-agnostic, see MiniNoteRoll.svelte), and
@@ -82,8 +83,8 @@
     for (const ch of channels) {
       if (ch.notes.length > 0) {
         for (const n of ch.notes) result.push({ ...n, id: ch.id * 1_000_000 + n.id });
-      } else if (ch.samplePath || ch.sampleFolder) {
-        const key = ch.samplePath || ch.sampleFolder || '';
+      } else if (channelHasSound(ch)) {
+        const key = ch.samplePath || ch.sampleFolder || ch.instrument.presetPath;
         // Drawn at a quarter of the sample's real length, and never longer
         // than one step, so hits on adjacent steps stay visibly separate
         // even when every step is filled.

@@ -1,0 +1,14 @@
+// Harpsichord — Bloom starter preset. Samples: LMMS sample library (GPL-2.0+).
+<control>
+label_cc1=Brightness
+label_cc4=Release
+set_cc1=127
+set_cc4=20
+
+<global>
+ampeg_attack=0.001 ampeg_decay=2 ampeg_sustain=40 ampeg_release=0.15
+fil_type=lpf_2p cutoff=900
+cutoff_oncc1=5400
+ampeg_release_oncc4=1.5
+
+<region> sample=../../samples/instruments/harpsichord01.ogg pitch_keycenter=60

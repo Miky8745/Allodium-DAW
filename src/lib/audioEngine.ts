@@ -7,6 +7,14 @@ import type { SongPlacement } from '$lib/songTimeline.svelte';
 import { SlideRegistry } from '$lib/slideVoices';
 import { profiler } from '$lib/debug/profiler';
 import { soundingPitch, type NoteProps } from '$lib/noteProps';
+import { loadPreset } from '$lib/instrument/presetLoader';
+import { presetSamples } from '$lib/instrument/regionSelect';
+import { instrumentShape, type VoiceShape } from '$lib/instrument/voiceShape';
+import { presetHits, sampleHit } from '$lib/instrument/hits';
+import { buildInstrumentVoice, type InstrumentHit } from '$lib/instrument/voiceGraph';
+import { releaseParam } from '$lib/instrument/envelope';
+import { sourceSampleRate } from '$lib/instrument/sourceRate';
+import { bloomActive, channelHasSound, usesPreset } from '$lib/instrument/channelSound';
 
 // Scheduler look-ahead (seconds) / tick interval (ms) defaults — the live
 // values are instance fields set from Preferences > General via
@@ -105,14 +113,21 @@ interface TrackChain {
 }
 
 // A held live note (MIDI input / QWERTY keyboard), started by
-// startLiveVoice() and sustained until releaseLiveVoice(). `src`/`gain` stay
-// unset until the sample has loaded; a release arriving before that just
+// startLiveVoice() and sustained until releaseLiveVoice(). `parts` stays
+// empty until the sample(s) have loaded; a release arriving before that just
 // marks it `released` so it never starts at all. `bend` (semitones) is kept
-// even before the source exists, so a bend arriving mid-load still applies.
-interface LiveVoice {
-  src?: AudioBufferSourceNode;
-  gain?: GainNode;
+// even before the sources exist, so a bend arriving mid-load still applies.
+// An instrument preset can layer several regions per note — one part each.
+interface LiveVoicePart {
+  src: AudioBufferSourceNode;
+  gain: GainNode;
   baseRate: number;
+  release: number;  // seconds
+  oneShot: boolean; // SFZ one_shot: ignores key-up
+}
+
+interface LiveVoice {
+  parts: LiveVoicePart[];
   bend: number;
   released: boolean;
 }
@@ -186,6 +201,9 @@ class AudioEngine {
   // it's played from).
   private folderCache   = new Map<string, MultisampleFolder>();
   private folderLoadingPromises = new Map<string, Promise<MultisampleFolder | null>>();
+  // Each loaded file's original sample rate (decodeAudioData resamples to
+  // the context rate) — SFZ loop points/offsets are in source frames.
+  private sourceRates = new Map<string, number>();
 
   stepDuration   = 0.5; // always kept current in tick()
   // Audio-context time the current loop cycle began. Advanced forward by
@@ -382,6 +400,12 @@ class AudioEngine {
   // dedup Maps, so this never duplicates an IPC/decode already in flight or
   // already cached, whether triggered by preload, real playback, or both.
   preloadChannel(ch: ChannelData): void {
+    if (usesPreset(ch)) {
+      loadPreset(ch.instrument.presetPath).then(preset => {
+        if (preset) for (const p of presetSamples(preset)) this.loadSample(p);
+      });
+      return;
+    }
     if (ch.samplePath) this.loadSample(ch.samplePath);
     if (ch.sampleFolder) {
       const folderPath = ch.sampleFolder;
@@ -415,6 +439,8 @@ class AudioEngine {
       try {
         // Raw binary IPC response — arrives as an ArrayBuffer (see lib.rs).
         const bytes = await invoke<ArrayBuffer>('read_audio_bytes', { relativePath });
+        const rate  = sourceSampleRate(bytes); // before decode detaches `bytes`
+        if (rate) this.sourceRates.set(relativePath, rate);
         const ctx   = await this.ensureCtx();
         const buf   = await ctx.decodeAudioData(bytes);
         this.bufferCache.set(relativePath, buf);
@@ -435,14 +461,17 @@ class AudioEngine {
   // AudioContext exactly like loadSample() does.
   // `props` (the note's own properties) applies its pan/fine pitch/filter/
   // release to the audition; velocity stays the fixed preview velocity.
-  async previewNote(ch: ChannelData, pitch: number, props?: NoteProps): Promise<void> {
+  // `durationSec` overrides the Preferences preview length (the instrument
+  // window auditions presets with a longer note so slow attacks are heard).
+  async previewNote(ch: ChannelData, pitch: number, props?: NoteProps, durationSec?: number): Promise<void> {
     const ctx = await this.ensureCtx();
     const playTime = ctx.currentTime + RAMP;
+    const duration = durationSec ?? this.previewDuration;
     const sounding = props ? soundingPitch({ pitch, finePitch: props.finePitch }) : pitch;
     const pan = props ? combinePan(ch.pan, props.pan) : ch.pan;
     const opts = props && voiceOpts(ch, props, sounding);
-    this.triggerPitched(ch, sounding, ch.volume * this.previewVelocity, pan, ch.mixerTrack, playTime, this.previewDuration, true, opts);
-    this.noteSink?.(ch, pitch, this.previewVelocity, playTime, this.previewDuration);
+    this.triggerPitched(ch, sounding, this.previewVelocity, pan, ch.mixerTrack, playTime, duration, true, opts);
+    this.noteSink?.(ch, pitch, this.previewVelocity, playTime, duration);
   }
 
   // ── Live (held) voices — MIDI input / QWERTY keyboard ─────────────────
@@ -452,54 +481,85 @@ class AudioEngine {
   // but deliberately ignores Channel Rack mute/solo — live input always
   // auditions the selected channel. Returns an id
   // synchronously so a note-off can never race a still-loading sample.
-  startLiveVoice(ch: ChannelData, pitch: number, velocity: number, bend = 0): number {
+  // `stepLike` (Channel Rack click auditions, see audition.ts): a plain
+  // sample channel holds at full level instead of decaying to sustain, so
+  // it sounds like the step hit it previews.
+  startLiveVoice(ch: ChannelData, pitch: number, velocity: number, bend = 0, stepLike = false): number {
     const id = this.nextVoiceId++;
-    const voice: LiveVoice = { baseRate: 1, bend, released: false };
+    const voice: LiveVoice = { parts: [], bend, released: false };
     this.liveVoices.set(id, voice);
     void (async () => {
       const ctx = await this.ensureCtx();
-      const picked = await this.resolvePitched(ch, pitch);
-      const buf = picked && await this.loadSample(picked.path);
-      if (!picked || !buf || voice.released || this.ctx !== ctx || !this.masterOut) {
-        this.liveVoices.delete(id);
-        return;
-      }
-      const time = ctx.currentTime + RAMP;
-      const vol = Math.max(0, Math.min(2, ch.volume * velocity));
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      voice.baseRate = picked.rate;
-      src.playbackRate.value = picked.rate * 2 ** (voice.bend / 12);
-      const gain = ctx.createGain();
-      const panner = ctx.createStereoPanner();
-      panner.pan.value = ch.pan * 2 - 1;
-      src.connect(gain).connect(panner).connect(this.resolveDestination(ch.mixerTrack));
-      gain.gain.setValueAtTime(0, time);
-      gain.gain.linearRampToValueAtTime(vol, time + ATTACK);
-      gain.gain.linearRampToValueAtTime(vol * SUSTAIN, time + ATTACK + DECAY);
-      src.onended = () => {
-        disconnectAll(src, gain, panner); // see playSample
-        if (this.liveVoices.get(id) === voice) this.liveVoices.delete(id);
-      };
-      src.start(time);
-      voice.src = src;
-      voice.gain = gain;
+      if (bloomActive(ch)) await this.startInstrumentLive(ctx, ch, pitch, velocity, voice, id);
+      else await this.startSampleLive(ctx, ch, pitch, velocity, voice, id, stepLike);
+      if (voice.parts.length === 0 && this.liveVoices.get(id) === voice) this.liveVoices.delete(id);
     })();
     return id;
   }
 
-  releaseLiveVoice(id: number): void {
+  // Wires a started part into its voice: cleanup on end, and the voice
+  // leaves liveVoices once every part has ended on its own.
+  private addLivePart(id: number, voice: LiveVoice, part: LiveVoicePart, nodes: (AudioNode | null)[]) {
+    voice.parts.push(part);
+    part.src.onended = () => {
+      disconnectAll(...nodes); // see playSample
+      voice.parts = voice.parts.filter(p => p !== part);
+      if (voice.parts.length === 0 && this.liveVoices.get(id) === voice) this.liveVoices.delete(id);
+    };
+  }
+
+  private async startSampleLive(ctx: AudioContext, ch: ChannelData, pitch: number, velocity: number, voice: LiveVoice, id: number, stepLike: boolean) {
+    const picked = await this.resolvePitched(ch, pitch);
+    const buf = picked && await this.loadSample(picked.path);
+    if (!picked || !buf || voice.released || this.ctx !== ctx || !this.masterOut) return;
+    const time = ctx.currentTime + RAMP;
+    const vol = Math.max(0, Math.min(2, ch.volume * velocity));
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.playbackRate.value = picked.rate * 2 ** (voice.bend / 12);
+    const gain = ctx.createGain();
+    const panner = ctx.createStereoPanner();
+    panner.pan.value = ch.pan * 2 - 1;
+    src.connect(gain).connect(panner).connect(this.resolveDestination(ch.mixerTrack));
+    gain.gain.setValueAtTime(0, time);
+    gain.gain.linearRampToValueAtTime(vol, time + ATTACK);
+    if (!stepLike) gain.gain.linearRampToValueAtTime(vol * SUSTAIN, time + ATTACK + DECAY);
+    this.addLivePart(id, voice, { src, gain, baseRate: picked.rate, release: RELEASE, oneShot: false }, [src, gain, panner]);
+    src.start(time);
+  }
+
+  private async startInstrumentLive(ctx: AudioContext, ch: ChannelData, pitch: number, velocity: number, voice: LiveVoice, id: number) {
+    const { hits, shape } = await this.resolveInstrumentHits(ch, pitch, velocity);
+    const bufs = await Promise.all(hits.map(h => this.loadSample(h.path)));
+    if (voice.released || this.ctx !== ctx || !this.masterOut) return;
+    const time = ctx.currentTime + RAMP;
+    const dest = this.resolveDestination(ch.mixerTrack);
+    hits.forEach((hit, i) => {
+      const buf = bufs[i];
+      if (!buf) return;
+      const v = buildInstrumentVoice(ctx, dest, buf, hit, {
+        volume: ch.volume * velocity, pan: ch.pan, time, duration: null, shape,
+        sourceRate: this.sourceRateOf(hit.path, buf), cutoffScale: 1, resonanceAdd: 0, releaseScale: 1,
+      });
+      v.src.playbackRate.value = hit.rate * 2 ** (voice.bend / 12);
+      this.addLivePart(id, voice, { src: v.src, gain: v.gain, baseRate: hit.rate, release: v.release, oneShot: hit.oneShot && !hit.loop }, [v.src, v.gain, v.filter, v.panner]);
+    });
+  }
+
+  // `force` also stops SFZ one_shot parts (which normally ignore key-up) —
+  // click auditions stop on mouse release no matter what.
+  releaseLiveVoice(id: number, force = false): void {
     const voice = this.liveVoices.get(id);
     if (!voice) return;
     voice.released = true;
     this.liveVoices.delete(id);
-    if (!voice.src || !voice.gain || !this.ctx) return;
+    if (!this.ctx) return;
     const t = this.ctx.currentTime;
-    const g = voice.gain.gain;
-    g.cancelScheduledValues(t);
-    g.setValueAtTime(g.value, t);
-    g.linearRampToValueAtTime(0, t + RELEASE);
-    voice.src.stop(t + RELEASE + 0.01);
+    for (const part of voice.parts) {
+      if (part.oneShot && !force) continue;
+      releaseParam(part.gain.gain, t, part.release);
+      part.src.stop(t + part.release + 0.01);
+    }
   }
 
   // Pitch bend: offsets a held voice by `semitones` from its own note pitch
@@ -508,9 +568,11 @@ class AudioEngine {
     const voice = this.liveVoices.get(id);
     if (!voice) return;
     voice.bend = semitones;
-    if (!voice.src || !this.ctx) return;
-    const rate = voice.baseRate * 2 ** (semitones / 12);
-    voice.src.playbackRate.setTargetAtTime(rate, this.ctx.currentTime, BEND_SMOOTHING);
+    if (!this.ctx) return;
+    for (const part of voice.parts) {
+      const rate = part.baseRate * 2 ** (semitones / 12);
+      part.src.playbackRate.setTargetAtTime(rate, this.ctx.currentTime, BEND_SMOOTHING);
+    }
   }
 
   releaseAllLiveVoices(): void {
@@ -617,7 +679,14 @@ class AudioEngine {
   // 60 for a plain step-sequencer trigger) — resolves either a single sample
   // (rate relative to middle C, as always) or a multisample folder (rate
   // relative to whichever recorded sample is nearest targetPitch).
-  private triggerPitched(ch: ChannelData, targetPitch: number, vol: number, pan: number, mixerTrack: number, playTime: number, durationSeconds?: number, allowLate = false, voice?: NoteVoiceOpts) {
+  // `velocity` is 0..1 (1 for step hits); channel volume is applied here.
+  // Instrument channels take their own path (triggerInstrument).
+  private triggerPitched(ch: ChannelData, targetPitch: number, velocity: number, pan: number, mixerTrack: number, playTime: number, durationSeconds?: number, allowLate = false, voice?: NoteVoiceOpts) {
+    if (bloomActive(ch)) {
+      this.triggerInstrument(ch, targetPitch, velocity, pan, mixerTrack, playTime, durationSeconds, allowLate, voice);
+      return;
+    }
+    const vol = ch.volume * velocity;
     if (ch.sampleFolder) {
       const folderPath = ch.sampleFolder;
       this.resolveFolder(folderPath).then(folder => {
@@ -628,6 +697,57 @@ class AudioEngine {
       const rate = 2 ** ((targetPitch - 60) / 12);
       this.scheduleHit(ch.samplePath, rate, vol, pan, mixerTrack, playTime, durationSeconds, allowLate, voice);
     }
+  }
+
+  // ── Instrument (Bloom) voices — see docs/instrument.md ────────────────
+  // The samples one note plays plus the resolved envelope/filter shape: the
+  // preset's matching regions, or (no preset) the channel's own
+  // sample/folder pick, shaped by the channel's instrument settings.
+  private async resolveInstrumentHits(ch: ChannelData, pitch: number, velocity: number): Promise<{ hits: InstrumentHit[]; shape: VoiceShape }> {
+    const inst = ch.instrument;
+    if (usesPreset(ch)) {
+      const preset = await loadPreset(inst.presetPath);
+      const shape = instrumentShape(inst, preset);
+      return { shape, hits: preset ? presetHits(preset, pitch, velocity, shape) : [] };
+    }
+    const shape = instrumentShape(inst, null);
+    const picked = await this.resolvePitched(ch, pitch);
+    return { shape, hits: picked ? [sampleHit(picked.path, picked.rate, shape)] : [] };
+  }
+
+  private sourceRateOf(path: string, buf: AudioBuffer): number {
+    return this.sourceRates.get(path) ?? buf.sampleRate;
+  }
+
+  // Step-sequencer hits on an instrument channel play as one-step notes
+  // (so the envelope applies) — an SFZ one_shot region still rings out.
+  private triggerInstrument(ch: ChannelData, pitch: number, velocity: number, pan: number, mixerTrack: number, playTime: number, durationSeconds: number | undefined, allowLate: boolean, voice?: NoteVoiceOpts) {
+    const duration = durationSeconds ?? this.stepDuration;
+    const volume = ch.volume * velocity;
+    this.resolveInstrumentHits(ch, pitch, velocity).then(({ hits, shape }) => {
+      for (const hit of hits) {
+        this.loadSample(hit.path).then(buf => {
+          if (!buf || !this.ctx || !this.masterOut) return;
+          if (!allowLate && this.ctx.currentTime - playTime > STALE_CUTOFF_SEC) { profiler.count('audio.staleDrop'); return; }
+          const time = Math.max(playTime, this.ctx.currentTime + RAMP);
+          const v = buildInstrumentVoice(this.ctx, this.resolveDestination(mixerTrack), buf, hit, {
+            volume, pan, time, duration, shape, sourceRate: this.sourceRateOf(hit.path, buf),
+            // Piano Roll mod X/Y/rel act relative to the instrument's own
+            // filter/release (all neutral at their defaults).
+            cutoffScale: voice ? filterCutoff(voice.modX) / filterCutoff(1) : 1,
+            resonanceAdd: voice ? filterQ(voice.modY) - filterQ(0) : 0,
+            releaseScale: voice ? releaseSeconds(voice.release) / RELEASE : 1,
+          });
+          profiler.count('audio.voiceStart');
+          this.activeVoices++;
+          v.src.onended = () => {
+            this.activeVoices--;
+            disconnectAll(v.src, v.gain, v.filter, v.panner); // see playSample
+          };
+          if (voice && !hit.oneShot) this.slides.registerVoice(voice.channelId, voice.color, v.src, voice.pitch, hit.rate, time, time + duration);
+        });
+      }
+    });
   }
 
   private scheduleHit(path: string, rate: number, vol: number, pan: number, mixerTrack: number, playTime: number, durationSeconds?: number, allowLate = false, voice?: NoteVoiceOpts) {
@@ -772,7 +892,7 @@ class AudioEngine {
     if (ch.muted || (anySoloed && !ch.soloed)) return;
     // A channel with no sample can still drive MIDI out from its piano-roll
     // notes (e.g. a hardware synth), so only bail here if it has neither.
-    const hasSample = !!(ch.samplePath || ch.sampleFolder);
+    const hasSample = channelHasSound(ch);
     if (!hasSample && !(ch.midiOutPort && ch.notes.length > 0)) return;
     const pan = ch.pan;
 
@@ -807,13 +927,13 @@ class AudioEngine {
           continue;
         }
         if (hasSample) {
-          this.triggerPitched(ch, pitch, ch.volume * note.velocity, combinePan(pan, note.pan), ch.mixerTrack, noteTime, durationSeconds, false, voiceOpts(ch, note, pitch));
+          this.triggerPitched(ch, pitch, note.velocity, combinePan(pan, note.pan), ch.mixerTrack, noteTime, durationSeconds, false, voiceOpts(ch, note, pitch));
         }
         // Only piano-roll notes go out as MIDI — never step-sequencer hits.
         this.noteSink?.(ch, note.pitch, note.velocity, noteTime, durationSeconds);
       }
     } else if (ch.steps[chStep]) {
-      this.triggerPitched(ch, 60, ch.volume, pan, ch.mixerTrack, playTime);
+      this.triggerPitched(ch, 60, 1, pan, ch.mixerTrack, playTime);
     }
   }
 

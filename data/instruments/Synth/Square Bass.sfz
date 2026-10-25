@@ -1,0 +1,24 @@
+// Square Bass — Bloom starter preset: a looped single-cycle square wave.
+// Samples: LMMS sample library (GPL-2.0+).
+<control>
+label_cc1=Cutoff
+label_cc2=Resonance
+label_cc4=Release
+label_cc5=Env Depth
+set_cc1=50
+set_cc2=20
+set_cc4=10
+set_cc5=50
+
+<global>
+loop_mode=loop_continuous
+ampeg_attack=0.002 ampeg_decay=0.2 ampeg_sustain=85 ampeg_release=0.06
+fil_type=lpf_2p cutoff=90 resonance=2
+fileg_attack=0.003 fileg_decay=0.3
+cutoff_oncc1=4800
+resonance_oncc2=14
+ampeg_release_oncc4=1
+fileg_depth_oncc5=4200
+
+// analogsqr.flac is one 9600-frame cycle at 96 kHz = 10 Hz (MIDI 3.49).
+<region> sample=../../samples/waveforms/analogsqr.flac pitch_keycenter=3 tune=49

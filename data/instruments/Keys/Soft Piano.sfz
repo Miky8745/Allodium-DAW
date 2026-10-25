@@ -1,0 +1,19 @@
+// Soft Piano — Bloom starter preset. Samples: LMMS sample library (GPL-2.0+),
+// see data/samples/CREDITS.md.
+<control>
+label_cc1=Brightness
+label_cc3=Attack
+label_cc4=Release
+set_cc1=110
+set_cc3=0
+set_cc4=40
+
+<global>
+ampeg_attack=0.002 ampeg_decay=1.5 ampeg_sustain=55 ampeg_release=0.25
+fil_type=lpf_2p cutoff=600
+cutoff_oncc1=6000
+ampeg_attack_oncc3=1
+ampeg_release_oncc4=2
+
+<region> sample=../../samples/instruments/piano02.ogg pitch_keycenter=48 lokey=0 hikey=54
+<region> sample=../../samples/instruments/piano01.ogg pitch_keycenter=60 lokey=55 hikey=127

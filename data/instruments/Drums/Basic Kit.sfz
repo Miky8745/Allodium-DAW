@@ -1,0 +1,34 @@
+// Basic Kit — Bloom starter preset: one drum per key from C5 (Allodium's
+// pitch 60, so plain step-sequencer hits play the kick). Closed hats
+// alternate between two samples (round robin).
+// Samples: LMMS sample library (GPL-2.0+).
+<control>
+label_cc1=Tone
+label_cc7=Volume
+set_cc1=127
+set_cc7=100
+
+<global>
+loop_mode=one_shot
+ampeg_attack=0.001 ampeg_sustain=100 ampeg_release=0.05
+fil_type=lpf_2p cutoff=500
+cutoff_oncc1=6000
+volume_oncc7=6
+
+<group>
+<region> sample=../../samples/drums/kick01.ogg key=60
+<region> sample=../../samples/drums/sidestick01.ogg key=61
+<region> sample=../../samples/drums/snare01.ogg key=62
+<region> sample=../../samples/drums/clap01.ogg key=63
+<region> sample=../../samples/drums/snare02.ogg key=64
+<region> sample=../../samples/drums/tom_low01.ogg key=65
+<region> sample=../../samples/drums/tom_mid01.ogg key=67
+<region> sample=../../samples/drums/hihat_foot_pedal01.ogg key=68
+<region> sample=../../samples/drums/tom_hi01.ogg key=69
+<region> sample=../../samples/drums/hihat_opened01.ogg key=70
+<region> sample=../../samples/drums/crash01.ogg key=71
+<region> sample=../../samples/drums/ride01.ogg key=72
+
+<group> seq_length=2
+<region> sample=../../samples/drums/hihat_closed01.ogg key=66 seq_position=1
+<region> sample=../../samples/drums/hihat_closed02.ogg key=66 seq_position=2

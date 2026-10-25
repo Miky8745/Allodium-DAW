@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Keep this file up to date.** Whenever you make a change worth noting — new commands, architecture decisions, IPC additions, navigation quirks, data conventions — add it here before finishing the task.
 
-**Size budget:** this file must stay well under ~150k chars (it's ~39k now). Long subsystem write-ups live in `docs/*.md` (`frontend-structure`, `playlist`, `midi`, `audio-playback`, `piano-roll`, `mixer`) — put new detail there and keep only a short summary + key gotchas here. Read the relevant `docs/` file before working on that subsystem.
+**Size budget:** this file must stay well under ~150k chars (it's ~39k now). Long subsystem write-ups live in `docs/*.md` (`frontend-structure`, `playlist`, `midi`, `audio-playback`, `piano-roll`, `mixer`, `instrument`) — put new detail there and keep only a short summary + key gotchas here. Read the relevant `docs/` file before working on that subsystem.
 
 ## Commands
 
@@ -30,6 +30,10 @@ npm run build
 # touched by a plain Vite/SvelteKit cache clear) plus node_modules/.vite
 # and .svelte-kit
 ./scripts/clear-cache.sh
+# WebKit cache only — this runs automatically before every `npm run tauri dev`
+# (tauri.conf.json's beforeDevCommand is `npm run dev:tauri`, which calls it
+# before `vite dev`); plain `npm run dev` doesn't clear anything
+./scripts/clear-cache.sh --webkit-only
 ```
 
 **Background launch** — `ALLODIUM_BACKGROUND=1 npm run tauri dev` starts the window minimized (Rust `setup`) and keeps it minimized after `openProject`'s `maximize()` (frontend asks the `background_launch` command; needs `core:window:allow-minimize`). Use this when launching the app for verification so it doesn't pop over the user's screen.
@@ -48,7 +52,7 @@ This is a **Tauri v2 desktop app** with two distinct layers:
 
 **Frontend** (`src/`): SvelteKit in **SPA mode** (SSR disabled, `adapter-static` with `fallback: "index.html"`). Svelte 5 runes syntax (`$state`, `$derived`, `$effect`, etc.) is used throughout. All routes live under `src/routes/`. There is no server-side code — SvelteKit is used purely as a client-side framework bundled by Vite.
 
-**Backend** (`src-tauri/`): Rust crate (`allodium_lib`). The Tauri app is initialized in `src-tauri/src/lib.rs`; `main.rs` just calls `allodium_lib::run()`. Tauri commands are defined with `#[tauri::command]` — most in `lib.rs`, but project-file persistence commands live in `src-tauri/src/project.rs`, global preferences in `src-tauri/src/preferences.rs`, MIDI I/O in `src-tauri/src/midi.rs`, and system-audio capture in `src-tauri/src/capture.rs` (each a separate module) — and all are registered via `invoke_handler!` in `lib.rs`. `lib.rs`'s `setup` also `.manage()`s the MIDI state and starts its two background threads (see "MIDI"). Rust unit tests: `cd src-tauri && cargo test --lib` (preferences XML round-trip, MIDI port-key parsing, `.alp` note backward-compat/round-trip); `cargo test --lib -- --ignored capture` smoke-tests system-audio capture against the running PulseAudio/PipeWire server. The frontend calls them with `invoke("command_name", { args })` from `@tauri-apps/api/core`.
+**Backend** (`src-tauri/`): Rust crate (`allodium_lib`). The Tauri app is initialized in `src-tauri/src/lib.rs`; `main.rs` just calls `allodium_lib::run()`. Tauri commands are defined with `#[tauri::command]` — most in `lib.rs`, but project-file persistence commands live in `src-tauri/src/project.rs`, instrument presets in `src-tauri/src/instruments.rs`, global preferences in `src-tauri/src/preferences.rs`, MIDI I/O in `src-tauri/src/midi.rs`, and system-audio capture in `src-tauri/src/capture.rs` (each a separate module) — and all are registered via `invoke_handler!` in `lib.rs`. `lib.rs`'s `setup` also `.manage()`s the MIDI state and starts its two background threads (see "MIDI"). Rust unit tests: `cd src-tauri && cargo test --lib` (preferences XML round-trip, MIDI port-key parsing, `.alp` note backward-compat/round-trip); `cargo test --lib -- --ignored capture` smoke-tests system-audio capture against the running PulseAudio/PipeWire server. The frontend calls them with `invoke("command_name", { args })` from `@tauri-apps/api/core`.
 
 **IPC boundary**: Frontend → backend is always Tauri's `invoke` mechanism; backend → frontend only uses Tauri events for MIDI (`midi-message`, `midi-ports-changed`, see "MIDI"). When adding new backend functionality, define the command in `lib.rs` and register it in `invoke_handler!`.
 
@@ -114,6 +118,7 @@ All app data lives under `data/` in the repo root. The Rust backend resolves thi
   - `history` — the undo/redo stacks (plain JSON, not XML — Rust treats its contents as an opaque string). Written/read by `save_history`/`load_history`.
 - **Preferences**: `data/preferences.xml` — global, not per-project (see "Preferences"). Written by `save_preferences`, read by `load_preferences`.
 - **Samples**: `data/samples/` — 240 audio files from LMMS's sample library (basses, bassloops, beats, drums, effects, instruments, latin, misc, shapes, stringsnpads, waveforms), **GPL-2.0-or-later** (`data/samples/LICENSE`, credits + upstream-rename table in `data/samples/CREDITS.md`); the app code itself is MIT. A few files were renamed to drop hardware brand names. LMMS's `drumsynth/` `.ds` presets were removed (the app can't play them).
+- **Instrument presets**: `data/instruments/<Category>/<Name>.sfz` — Bloom presets (see "Bloom instrument"). The starter set only references the bundled LMMS samples via `../../samples/…`.
 - **Licensing rule for bundled content** — only commit sounds/assets that may be redistributed (CC0 preferred, CC-BY/GPL with a license + credit file next to them). Never commit third-party DAW factory content or anything with no-redistribution/NC terms; `data/samples/local_samples/` is gitignored for a local-only user library. Don't name third-party DAW products in code, comments or docs.
 - **Icons** — `src-tauri/icons/` (+ `gen/android` launcher icons) and `static/favicon.png` are generated from the leaf logo (same SVG as `MenuBar`/`Sidebar`): render it to a 1024px PNG with `rsvg-convert`, then `npx tauri icon <png>`.
 
@@ -134,6 +139,8 @@ Most commands are defined in `src-tauri/src/lib.rs`; project-file persistence co
 | `get_data_root` | — | `String` | Absolute path to the `data/` directory |
 | `read_audio_bytes` | `relative_path: String` | `tauri::ipc::Response` (raw binary → `ArrayBuffer` in JS) | Reads `data/<relative_path>` and returns raw bytes (path traversal blocked). **Must stay a binary `Response`, never `Vec<u8>`** — a `Vec<u8>` is JSON-encoded as a number array (~4x size, parsed on the main thread), which froze the UI on every sample load. Some sample libraries ship files as a RIFF/WAVE shell with format tag `0x674F` (Ogg Vorbis mode 1) whose "data" chunk is actually a raw Ogg Vorbis stream browsers don't recognize wrapped as-is; this command unwraps that shell down to the plain Ogg payload before returning (`unwrap_ogg_in_wav` in `lib.rs`) — a no-op for ordinary PCM WAVs |
 | `list_dir_files` | `relative_path: String` | `Vec<String>` | Non-recursive list of audio-file names (`wav`/`ogg`/`mp3`/`flac`) directly inside a data-relative folder, sorted. Used to build a multisample instrument when a folder is dropped onto a channel (see "Multisample instrument folders" below) |
+| `read_text_file` | `relative_path: String` | `String` | Reads a data-relative text file (an `.sfz` preset); path traversal blocked (`instruments.rs`) |
+| `list_presets` | — | `Vec<String>` | Every `.sfz` under `data/instruments/` (recursive), data-relative, sorted (`instruments.rs`) |
 | `save_project` | `name: String, project: ProjectFile` | `()` | Serializes `project` to XML and writes `data/projects/<name>/<name>.alp` |
 | `load_project` | `name: String` | `Option<ProjectFile>` | Reads/parses `<name>.alp`; `None` if it doesn't exist yet |
 | `save_history` | `name: String, contents: String` | `()` | Writes the opaque JSON `contents` string to `data/projects/<name>/history` |
@@ -163,6 +170,7 @@ Most commands are defined in `src-tauri/src/lib.rs`; project-file persistence co
 - Channel Rack solo (`ChannelData.soloed`, Ctrl+click mute dot) is single-solo and persisted — separate from `playback.soloChannelId` (Piano Roll audition filter) and the Mixer's solo.
 - quick-xml round-trips `Option::None` as `Some("")`: normalize at import with `||`, not `??`.
 - Samples load via `read_audio_bytes` (binary) and are cached; channels are preloaded on project open / sample drop so the first hit isn't dropped by the 150ms staleness cutoff (previews pass `allowLate`).
+- **Click auditions** (`src/lib/audition.ts`): a left press on a Channel Rack step or a channel's sample field plays that channel's step sound (pitch 60, velocity 1, via `audioEngine.startLiveVoice(..., stepLike=true)` — plain samples hold at full level instead of decaying to sustain) until the mouse is released anywhere (`releaseLiveVoice(id, force=true)` also stops SFZ one-shots). Only the pressed step sounds, not steps painted by dragging. Ignores mute/solo, like other live input.
 - Per-pattern step/note content: channels are shared across patterns; `channelStore.switchPattern()` (called by `patternStore`'s `selectedPatternId` setter) stashes/restores content.
 
 ## Views (both in `src/routes/+page.svelte`)
@@ -236,6 +244,15 @@ Toolbar's Channel Rack/Piano Roll/Playlist/Mixer toggle buttons implement 3-stat
 - Note properties (velocity, pan, release, modX/modY filter, fine pitch, palette color, slide) via `noteProps.ts`; `normalizeNote()` on import. Slide notes glide same-channel same-color voices (`slideVoices.ts`).
 - Deletion effect (`deleteFx.ts`) only plays for elements marked via `markDeleted(key)` before removal — new delete paths must call it.
 - Auto-extend grows `patternLength` by a bar when notes reach the last bar. The playhead is wrapped to the open channel's own loop length.
+
+## Bloom instrument
+
+**Details: [`docs/instrument.md`](docs/instrument.md).** A preset-based sample instrument, the first **plugin**: a channel's sample field can have one plugin assigned (`ChannelData.plugin`, `''` = none; registry in `src/lib/plugins/registry.ts` — new plugins are added there, and the registry shape is meant to also fit external plugins later). Bloom's settings are `ChannelData.instrument` (saved/undo-tracked); Bloom only plays when `plugin === 'bloom'` **and** `instrument.enabled` (`bloomActive()`), otherwise the channel behaves exactly as before. Presets are plain **SFZ** files (`data/instruments/`, parsed in `src/lib/instrument/sfz.ts`); macros are standard SFZ `label_ccN`/`set_ccN` + `<param>_onccN`. Key points:
+
+- Envelope/filter are **channel-wide**: loading a preset copies its first region's values into the channel (`presetDefaults()`); per-region mapping/volume/pan/tune still apply. A preset takes priority over `samplePath`/`sampleFolder` — use `channelHasSound()`/`usesPreset()`, never `samplePath || sampleFolder`, to ask "does this channel make sound".
+- `audioEngine.triggerPitched()` now takes a **0..1 velocity** (not a pre-multiplied volume) and branches to `triggerInstrument()`; instrument step hits are one-step notes (SFZ `one_shot` regions ring out). Live voices hold `parts[]` (layered regions).
+- **Sample field** (ChannelRow's `.sample-drop`): right-click opens its own plugin menu (`SampleFieldMenu.svelte`, separate from the row's menu — it stops propagation) listing every registered plugin + "Remove plugin"; picking one assigns and opens it. Double-click opens the assigned plugin's window, or the Piano Roll when none is assigned. With a plugin assigned the field is labeled with the plugin's name (`formatChannelLabel`; a user rename still wins) — `formatSourceLabel()` gives the actual preset/sample name. No Toolbar button.
+- Window: `InstrumentWindow.svelte` (id `instrument`); open state in `instrument/instrumentWindow.svelte.ts`. Dropping an `.sfz` from the explorer onto a channel assigns Bloom and loads it (`channelDrop.ts`).
 
 ## Mixer
 

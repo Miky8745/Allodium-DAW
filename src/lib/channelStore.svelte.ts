@@ -1,6 +1,7 @@
 import type { ChannelData, Note } from './types';
 import { normalizeNote } from './noteProps';
 import { profiler } from './debug/profiler';
+import { defaultInstrument, exportInstrument, normalizeInstrument, type InstrumentExport } from './instrument/types';
 
 let nextId = 1;
 
@@ -22,6 +23,8 @@ function makeChannel(id: number, stepCount: number): ChannelData {
     color: null,
     midiOutPort: null,
     midiOutChannel: 1,
+    plugin: '',
+    instrument: defaultInstrument(),
   };
 }
 
@@ -43,6 +46,8 @@ export interface ChannelSettingsExport {
   color: string | null;
   midiOutPort: string | null;
   midiOutChannel: number;
+  plugin: string;
+  instrument: InstrumentExport;
 }
 
 export interface PatternContentEntry {
@@ -356,6 +361,8 @@ class ChannelStore {
         pan: c.pan, volume: c.volume, mixerTrack: c.mixerTrack,
         name: c.name, color: c.color,
         midiOutPort: c.midiOutPort, midiOutChannel: c.midiOutChannel,
+        plugin: c.plugin,
+        instrument: exportInstrument(c.instrument),
       })),
       content,
       beatsPerBar: this.#beatsPerBar,
@@ -401,6 +408,10 @@ class ChannelStore {
         pan: c.pan, volume: c.volume, mixerTrack: c.mixerTrack,
         name: c.name || null, color: c.color || null,
         midiOutPort: c.midiOutPort || null, midiOutChannel: c.midiOutChannel || 1,
+        // Both missing in saves/history from before plugins existed; a
+        // channel saved with Bloom on but before `plugin` existed gets it.
+        plugin: c.plugin || (c.instrument?.enabled ? 'bloom' : ''),
+        instrument: normalizeInstrument(c.instrument),
         steps: live ? live.steps : (Array(this.#stepCount).fill(false) as boolean[]),
         notes: live ? live.notes : [],
       };

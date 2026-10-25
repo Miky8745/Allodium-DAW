@@ -40,6 +40,65 @@ pub struct ChannelSettings {
     pub midi_out_port: Option<String>,
     #[serde(default = "default_midi_channel")]
     pub midi_out_channel: u8,
+    // Plugin assigned to the channel's sample field ("" = none, "bloom").
+    // Plain String sentinel, not Option (quick-xml None -> Some("")).
+    #[serde(default)]
+    pub plugin: String,
+    // Bloom's settings (envelope/filter/macros/SFZ preset) — see
+    // docs/instrument.md. Absent in files saved before it existed.
+    #[serde(default)]
+    pub instrument: InstrumentXml,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct MacrosXml {
+    #[serde(rename = "value", default)]
+    pub items: Vec<f64>,
+}
+
+// Mirrors src/lib/instrument/types.ts's InstrumentSettings. Container-level
+// #[serde(default)] fills any missing field from Default below; no Option
+// fields (preset_path "" = no preset) because of quick-xml's
+// None -> Some("") round trip.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", default)]
+pub struct InstrumentXml {
+    pub enabled: bool,
+    pub preset_path: String,
+    pub attack: f64,
+    pub decay: f64,
+    pub sustain: f64,
+    pub release: f64,
+    pub filter_type: String,
+    pub cutoff: f64,
+    pub resonance: f64,
+    pub filter_env_depth: f64,
+    pub filter_env_attack: f64,
+    pub filter_env_decay: f64,
+    pub tune: f64,
+    pub macros: MacrosXml,
+}
+
+// Must match defaultInstrument() in src/lib/instrument/types.ts.
+impl Default for InstrumentXml {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            preset_path: String::new(),
+            attack: 0.001,
+            decay: 0.05,
+            sustain: 0.7,
+            release: 0.05,
+            filter_type: "lowpass".to_string(),
+            cutoff: 20000.0,
+            resonance: 0.0,
+            filter_env_depth: 0.0,
+            filter_env_attack: 0.001,
+            filter_env_decay: 0.3,
+            tune: 0.0,
+            macros: MacrosXml { items: vec![0.5; 8] },
+        }
+    }
 }
 
 fn default_midi_channel() -> u8 {
@@ -284,5 +343,54 @@ mod tests {
         let n = &back.content.items[0].notes[0];
         assert_eq!((n.start, n.slide, n.color, n.fine_pitch), (4.5, true, 7, -250.0));
         assert_eq!(back.note_colors.items, vec!["#f9fffe".to_string(), "#123456".to_string()]);
+    }
+
+    const OLD_CHANNEL: &str = r#"<ProjectFile>
+  <beatsPerBar>4</beatsPerBar><patternLength>16</patternLength><tempo>120</tempo><selectedPatternId>1</selectedPatternId>
+  <channels><channel><id>0</id><samplePath>samples/drums/kick01.ogg</samplePath><muted>false</muted><pan>0.5</pan><volume>0.8</volume><mixerTrack>0</mixerTrack></channel></channels>
+  <content/><patterns/><placements/>
+</ProjectFile>"#;
+
+    #[test]
+    fn loads_channels_saved_before_instruments() {
+        let p: ProjectFile = quick_xml::de::from_str(OLD_CHANNEL).unwrap();
+        assert_eq!(p.channels.items[0].plugin, "");
+        let inst = &p.channels.items[0].instrument;
+        assert!(!inst.enabled);
+        assert_eq!(inst.preset_path, "");
+        assert_eq!((inst.sustain, inst.cutoff), (0.7, 20000.0));
+        assert_eq!(inst.macros.items.len(), 8);
+    }
+
+    #[test]
+    fn round_trips_instrument_settings() {
+        let mut p: ProjectFile = quick_xml::de::from_str(OLD_CHANNEL).unwrap();
+        p.channels.items[0].plugin = "bloom".into();
+        let inst = &mut p.channels.items[0].instrument;
+        inst.enabled = true;
+        inst.preset_path = "instruments/Pads/Analog Pad.sfz".into();
+        inst.cutoff = 1234.5;
+        inst.filter_type = "bandpass".into();
+        inst.macros.items = vec![0.0, 1.0, 0.25, 0.5, 0.5, 0.5, 0.5, 0.75];
+        let mut body = String::new();
+        let mut ser = Serializer::new(&mut body);
+        ser.indent(' ', 2);
+        p.serialize(ser).unwrap();
+        let back: ProjectFile = quick_xml::de::from_str(&body).unwrap();
+        assert_eq!(back.channels.items[0].plugin, "bloom");
+        let inst = &back.channels.items[0].instrument;
+        assert!(inst.enabled);
+        assert_eq!(inst.preset_path, "instruments/Pads/Analog Pad.sfz");
+        assert_eq!((inst.cutoff, inst.filter_type.as_str()), (1234.5, "bandpass"));
+        assert_eq!(inst.macros.items, vec![0.0, 1.0, 0.25, 0.5, 0.5, 0.5, 0.5, 0.75]);
+
+        // An instrument without a preset writes an empty <presetPath/> tag,
+        // which must come back as "" (not fail to parse).
+        let mut p2 = back.clone();
+        p2.channels.items[0].instrument.preset_path = String::new();
+        let mut body = String::new();
+        p2.serialize(Serializer::new(&mut body)).unwrap();
+        let back2: ProjectFile = quick_xml::de::from_str(&body).unwrap();
+        assert_eq!(back2.channels.items[0].instrument.preset_path, "");
     }
 }

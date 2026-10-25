@@ -1,10 +1,12 @@
 mod capture;
 mod debug;
+mod instruments;
 mod midi;
 mod preferences;
 mod project;
 use capture::{system_audio_start, system_audio_stop};
 use debug::{debug_config, debug_exit, perf_log};
+use instruments::{list_presets, read_text_file};
 use midi::{midi_list_ports, midi_schedule, midi_send, midi_set_inputs, midi_set_outputs, midi_stop_all};
 use preferences::{load_preferences, save_preferences};
 use project::{load_history, load_project, save_history, save_project};
@@ -239,6 +241,8 @@ pub fn run() {
             get_data_root,
             read_audio_bytes,
             list_dir_files,
+            read_text_file,
+            list_presets,
             save_project,
             load_project,
             save_history,

@@ -1,0 +1,21 @@
+// Analog Pluck — Bloom starter preset. Samples: LMMS sample library (GPL-2.0+).
+<control>
+label_cc1=Cutoff
+label_cc2=Resonance
+label_cc4=Decay
+label_cc5=Env Depth
+set_cc1=50
+set_cc2=40
+set_cc4=40
+set_cc5=60
+
+<global>
+ampeg_attack=0.001 ampeg_decay=0.4 ampeg_sustain=30 ampeg_release=0.08
+fil_type=lpf_2p cutoff=120 resonance=4
+fileg_attack=0.002 fileg_decay=0.25
+cutoff_oncc1=4800
+resonance_oncc2=14
+ampeg_decay_oncc4=1.5
+fileg_depth_oncc5=4800
+
+<region> sample=../../samples/basses/analog_pluck01.ogg pitch_keycenter=36
