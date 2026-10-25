@@ -36,6 +36,11 @@
   } = $props();
 
   let dragging = $state(false);
+  // Drag anchor: the value follows the cursor's vertical distance from where
+  // the drag started (position-linear), not the summed movementY deltas —
+  // those carry the OS pointer acceleration, so fast drags travelled farther.
+  let dragStartY = 0;
+  let dragStartValue = 0;
 
   let angle = $derived(sweepStart + (value / max) * sweepDegrees);
 
@@ -75,15 +80,17 @@
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
+    dragStartY = e.clientY;
+    dragStartValue = value;
     dragging = true;
   }
 
   function onMousemove(e: MouseEvent) {
     if (!dragging) return;
-    // sensitivity is "pixels to sweep the full range", so the delta is
+    // sensitivity is "pixels to sweep the full range", so the distance is
     // scaled by max — otherwise a wider range (e.g. Volume's 0-2) would
     // whip past in half the drag distance of a 0-1 dial.
-    value = Math.max(0, Math.min(max, value - (e.movementY / sensitivity) * max));
+    value = Math.max(0, Math.min(max, dragStartValue + ((dragStartY - e.clientY) / sensitivity) * max));
   }
 
   function onMouseup() {

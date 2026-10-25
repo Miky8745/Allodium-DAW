@@ -64,6 +64,8 @@ Right-clicking a `ChannelRow` (anywhere except the step buttons, which keep thei
 PLUGINS          (every registry plugin, assigned one ✓ — picking assigns + opens it)
 Remove plugin    (only when one is assigned)
 ─────────
+Open in Piano Roll   (same as the sample field's double-click with no plugin — ChannelRow's onOpenPianoRoll)
+─────────
 Fill every 2 steps
 Fill every 4 steps
 Fill every 8 steps

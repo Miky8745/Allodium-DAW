@@ -36,6 +36,11 @@
   } = $props();
 
   let dragging = $state(false);
+  // Drag anchor: the value follows the cursor's vertical distance from where
+  // the drag started (position-linear), not the summed movementY deltas —
+  // those carry the OS pointer acceleration, so fast drags travelled farther.
+  let dragStartY = 0;
+  let dragStartValue = 0;
 
   // SVG canvas: 32×32, radius 12, center (16,16) — same reference frame as Dial.
   const CX = 16, CY = 16, R = 12;
@@ -66,12 +71,14 @@
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
+    dragStartY = e.clientY;
+    dragStartValue = value;
     dragging = true;
   }
 
   function onMousemove(e: MouseEvent) {
     if (!dragging) return;
-    value = Math.max(0, Math.min(max, value - (e.movementY / sensitivity) * max));
+    value = Math.max(0, Math.min(max, dragStartValue + ((dragStartY - e.clientY) / sensitivity) * max));
   }
 
   function onMouseup() {

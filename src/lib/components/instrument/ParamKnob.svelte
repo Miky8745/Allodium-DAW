@@ -23,16 +23,24 @@
     size?: number;
     disabled?: boolean;
   } = $props();
+
+  // The Dial's position, unrounded. A stepped scale (Tune, whole
+  // semitones) would otherwise round every small mousemove straight back
+  // to the current value, so a slow drag never moved the knob. Writable
+  // $derived: a drag overrides it; an outside change to `value` resets it.
+  let norm = $derived(scale.toNorm(value));
 </script>
 
+<!-- No DragTooltip (tooltipKey): the value is already shown under the knob,
+     and repainting a portalled tooltip over this window every mousemove
+     tripled frame times while dragging (see docs/instrument.md › UI). -->
 <div class="pk" class:pk--disabled={disabled}>
   <Dial
-    bind:value={() => scale.toNorm(value), (n) => onchange(scale.fromNorm(n))}
+    bind:value={() => norm, (n) => { norm = n; onchange(scale.fromNorm(n)); }}
     defaultValue={scale.toNorm(defaultValue)}
     {size}
     showArc
     sensitivity={180}
-    tooltipKey={label.toUpperCase()}
     format={(n) => scale.format(scale.fromNorm(n))}
     name={name || label}
   />

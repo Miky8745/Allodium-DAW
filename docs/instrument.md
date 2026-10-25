@@ -167,6 +167,14 @@ and up to 8 **macro knobs** defined by the preset.
 - `ParamKnob.svelte` wraps `Dial` with a function binding over normalized
   0..1 travel, and `paramScales.ts` maps it to the real value (exponential
   for times and cutoff). Double-click or right-click resets to the default.
+  The binding goes through a writable `$derived` holding the *unrounded*
+  position, so a stepped scale (Tune, whole semitones) still moves on slow
+  1px drags instead of rounding each move back to the current value.
+- **No drag tooltip on these knobs** (`tooltipKey` is left empty): the value
+  already shows under each knob, and a headless drag benchmark showed the
+  portalled `DragTooltip` repainting over this window tripled frame times
+  (~86ms → ~30ms per frame without it, on Xvfb). JS per move is ~1ms; the
+  cost is all paint, so don't add per-move visuals over this window lightly.
 - The window header and source line show what actually plays
   (`formatSourceLabel()`: the preset or sample name).
 

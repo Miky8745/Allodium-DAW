@@ -231,7 +231,7 @@
 </div>
 
 {#if contextMenu}
-  <ChannelRowMenu {channel} x={contextMenu.x} y={contextMenu.y} onClose={() => (contextMenu = null)} {onDelete} />
+  <ChannelRowMenu {channel} x={contextMenu.x} y={contextMenu.y} onClose={() => (contextMenu = null)} {onDelete} {onOpenPianoRoll} />
 {/if}
 
 <style>

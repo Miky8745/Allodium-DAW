@@ -1,11 +1,12 @@
 // Pointer/keyboard editing of placed blocks on the Playlist timeline —
 // the Piano Roll's three tools (editTools.ts) applied to placements:
 //   draw    — click empty lane space places the active pattern (and keeps
-//             moving it while held); click a block selects it (Ctrl
-//             toggles, Shift adds) and drags the selection; Ctrl/Shift+drag
-//             on empty space marquee-selects.
+//             moving it while held); click a block selects it (Shift
+//             adds) and drags the selection; Shift+drag on empty space
+//             marquee-selects.
 //   delete  — click/drag erases blocks.
 //   marquee — every drag is a selection box.
+// Ctrl+drag is the marquee tool's drag in every tool, on blocks too.
 // The right button deletes / drag-deletes in every tool. Blocks never
 // overlap: a single block uses nearestFreeStart (sticks flush to a
 // neighbour), a multi-block selection moves rigidly and simply stops at
@@ -35,7 +36,7 @@ interface MoveDrag {
   collapseTo: number | null; // plain click inside a multi-selection: narrow to it if nothing moved
 }
 
-type MarqueeMode = 'replace' | 'add' | 'toggle';
+type MarqueeMode = 'replace' | 'add';
 
 // Grid-local px (the box scrolls with the content).
 export interface Marquee { x0: number; y0: number; x1: number; y1: number }
@@ -115,8 +116,9 @@ export class PlaylistEditor {
   // Left button on empty lane space.
   onLanePointerDown(e: PointerEvent, trackId: number) {
     if (e.button !== 0 || !this.#deps.grid()) return;
+    if (this.tool === 'marquee' || e.ctrlKey || e.metaKey) { this.#startMarquee(e); return; }
     if (this.tool === 'delete') { this.#startDelete(e, 1); return; }
-    if (this.tool === 'marquee' || e.ctrlKey || e.metaKey || e.shiftKey) { this.#startMarquee(e); return; }
+    if (e.shiftKey) { this.#startMarquee(e); return; }
     // Draw: place the active pattern in the clicked beat cell — or flush
     // against a neighbour if it wouldn't fit there, but never more than
     // its own length away — and keep moving it while the button is held.
@@ -137,15 +139,10 @@ export class PlaylistEditor {
     if (e.button !== 0) return;
     e.stopPropagation(); // not a lane click
     if (!this.#deps.grid()) return;
+    if (this.tool === 'marquee' || e.ctrlKey || e.metaKey) { this.#startMarquee(e); return; }
     if (this.tool === 'delete') { this.#startDelete(e, 1); return; }
-    if (this.tool === 'marquee') { this.#startMarquee(e); return; }
     this.#adopt(placement);
     const id = placement.id;
-    if (e.ctrlKey || e.metaKey) {
-      if (this.selected.has(id)) this.selected.delete(id);
-      else this.selected.add(id);
-      return;
-    }
     let collapseTo: number | null = null;
     if (e.shiftKey) this.selected.add(id);
     else if (!this.selected.has(id)) this.#select([id]);
@@ -249,7 +246,7 @@ export class PlaylistEditor {
   }
 
   // ── Marquee ─────────────────────────────────────────────────────────
-  // Plain = replace, Shift = add, Ctrl = toggle (same as the Piano Roll).
+  // Plain = replace, Shift = add (same as the Piano Roll).
   // A click without dragging selects (and adopts) the block under the
   // pointer, or clears on empty space.
 
@@ -260,7 +257,7 @@ export class PlaylistEditor {
 
   #startMarquee(e: PointerEvent) {
     const { x, y } = this.#local(e);
-    this.#marqueeMode = e.ctrlKey || e.metaKey ? 'toggle' : e.shiftKey ? 'add' : 'replace';
+    this.#marqueeMode = e.shiftKey ? 'add' : 'replace';
     this.#marqueeBase = this.#marqueeMode === 'replace' ? [] : [...this.selected];
     this.marquee = { x0: x, y0: y, x1: x, y1: y };
     this.#applyMarquee();
@@ -287,13 +284,7 @@ export class PlaylistEditor {
       const r = el.getBoundingClientRect();
       if (r.left <= right && r.right >= left && r.top <= bottom && r.bottom >= top) hits.push(id);
     }
-    if (this.#marqueeMode === 'toggle') {
-      const next = new Set(this.#marqueeBase);
-      for (const id of hits) next.has(id) ? next.delete(id) : next.add(id);
-      this.#select(next);
-    } else {
-      this.#select(new Set([...this.#marqueeBase, ...hits]));
-    }
+    this.#select(new Set([...this.#marqueeBase, ...hits]));
   }
 
   #endMarquee() {

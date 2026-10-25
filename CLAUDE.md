@@ -243,7 +243,7 @@ Toolbar's Channel Rack/Piano Roll/Playlist/Mixer toggle buttons implement 3-stat
 - Floating window editing `channelStore.selectedChannel`; opened by double-clicking a channel's sample name or from the Toolbar (auto-selects the first channel).
 - `pianoroll/pitch.ts` is the single source of pixel math; sizes go through zoom-aware `keyH()`/`stepW()` (`MiniNoteRoll`'s Channel Rack preview uses fixed `BASE_*`). Shift during a drag = unsnapped fractional steps.
 - Only `NoteGrid`'s viewport scrolls natively; keys/ruler/velocity lane follow via `transform`. All three viewports need `height: 100%` or nothing clips.
-- Tools: Draw (click places/selects + adopts length/color, drag moves, right edge resizes), Marquee, Delete; right button deletes in every tool. Delete with nothing selected clears the channel's notes.
+- Tools: Draw (click places/selects + adopts length/color, drag moves, right edge resizes), Marquee, Delete; right button deletes in every tool; Ctrl+drag = the Marquee tool's drag in every tool (same in the Playlist). Delete with nothing selected clears the channel's notes.
 - Note properties (velocity, pan, release, modX/modY filter, fine pitch, palette color, slide) via `noteProps.ts`; `normalizeNote()` on import. Slide notes glide same-channel same-color voices (`slideVoices.ts`).
 - Deletion effect (`deleteFx.ts`) only plays for elements marked via `markDeleted(key)` before removal — new delete paths must call it.
 - Auto-extend grows `patternLength` by a bar when notes reach the last bar. The playhead is wrapped to the open channel's own loop length.
@@ -256,6 +256,7 @@ Toolbar's Channel Rack/Piano Roll/Playlist/Mixer toggle buttons implement 3-stat
 - `audioEngine.triggerPitched()` now takes a **0..1 velocity** (not a pre-multiplied volume) and branches to `triggerInstrument()`; instrument step hits are one-step notes (SFZ `one_shot` regions ring out). Live voices hold `parts[]` (layered regions).
 - **Sample field** (ChannelRow's `.sample-drop`): right-click opens the row's one context menu (`ChannelRowMenu.svelte`), whose top "Plugins" section lists every registered plugin + "Remove plugin"; picking one assigns and opens it. Double-click opens the assigned plugin's window, or the Piano Roll when none is assigned. With a plugin assigned the field is labeled with the plugin's name (`formatChannelLabel`; a user rename still wins) — `formatSourceLabel()` gives the actual preset/sample name. No Toolbar button.
 - **Packs**: "Get more instruments…" (preset browser) installs single instruments from CC0 libraries on demand — only that instrument's files are downloaded (see docs/instrument.md › Packs).
+- Bloom knobs (`ParamKnob`) deliberately have no `DragTooltip` — repainting it over the window per mousemove tripled drag frame times; the value is shown under the knob instead (docs/instrument.md › UI).
 - Window: `InstrumentWindow.svelte` (id `instrument`); open state in `instrument/instrumentWindow.svelte.ts`. Dropping an `.sfz` from the explorer onto a channel assigns Bloom and loads it (`channelDrop.ts`).
 
 ## Mixer

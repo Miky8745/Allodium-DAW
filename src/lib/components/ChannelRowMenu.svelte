@@ -8,16 +8,17 @@
   import { PLUGINS, assignPlugin, removePlugin, pluginById } from '$lib/plugins/registry';
 
   // A Channel Rack row's single right-click menu (row and sample field alike):
-  // plugins / fill / rename / recolor / MIDI out / delete. Steps have their
+  // plugins / open in Piano Roll / fill / rename / recolor / MIDI out / delete. Steps have their
   // own right-click meaning (erase step) and never open it. `menuView` lets
   // Rename/Recolor/MIDI out take over the same menu body instead of opening
   // a second portal/overlay.
-  let { channel, x, y, onClose, onDelete }: {
+  let { channel, x, y, onClose, onDelete, onOpenPianoRoll }: {
     channel: ChannelData;
     x: number;
     y: number;
     onClose: () => void;
     onDelete: () => void;
+    onOpenPianoRoll: () => void;
   } = $props();
 
   let menuView = $state<'main' | 'rename' | 'recolor' | 'midi'>('main');
@@ -35,6 +36,11 @@
     const channelId = channel.id;
     onClose();
     removePlugin(channelId);
+  }
+
+  function openPianoRoll() {
+    onClose();
+    onOpenPianoRoll();
   }
 
   function deleteChannel() {
@@ -111,6 +117,8 @@
       {#if channel.plugin}
         <button class="ctx-item ctx-item--danger" role="menuitem" onclick={clearPlugin}>Remove plugin</button>
       {/if}
+      <div class="ctx-sep"></div>
+      <button class="ctx-item" role="menuitem" onclick={openPianoRoll}>Open in Piano Roll</button>
       <div class="ctx-sep"></div>
       <button class="ctx-item" role="menuitem" onclick={() => fillEvery(2)}>Fill every 2 steps</button>
       <button class="ctx-item" role="menuitem" onclick={() => fillEvery(4)}>Fill every 4 steps</button>

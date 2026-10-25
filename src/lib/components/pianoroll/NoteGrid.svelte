@@ -97,8 +97,8 @@
   // Click on empty space places one note of lastLength (in the current
   // default color); keeping the button down and dragging moves that new
   // note (position + pitch, like dragging an existing one — length only
-  // changes by grabbing a note's right edge). Clicking a note selects it (Ctrl toggles,
-  // Shift adds — only needed for multi-select), adopts its color/length for
+  // changes by grabbing a note's right edge). Clicking a note selects it
+  // (Shift adds — only needed for multi-select), adopts its color/length for
   // the next placed note, and dragging moves the whole selection; grabbing
   // a note's last ~6px resizes it instead.
   type DrawDrag = { mode: 'resize-existing'; noteId: number; anchorStepSnapped: number; anchorStepFree: number; origLength: number };
@@ -119,12 +119,11 @@
     const stepFree = xToStepFree(x);
     const pitch = yToPitch(y);
     if (stepSnapped >= patternLength) return;
-    const additive = e.ctrlKey || e.metaKey;
 
     const hit = noteAt(stepSnapped, pitch);
     if (!hit) {
-      // Ctrl/Shift+drag on empty space still marquee-selects from Draw.
-      if (additive || e.shiftKey) { startMarquee(e, x, y); return; }
+      // Shift+drag on empty space marquee-selects (adding) from Draw.
+      if (e.shiftKey) { startMarquee(e, x, y); return; }
       clearSelection(); // clicking empty space deselects (and draws)
       const len = Math.max(1, Math.min(patternLength - stepSnapped, lastLength));
       const note = createNote(stepSnapped, pitch, len);
@@ -134,21 +133,16 @@
     }
 
     adoptTemplate(hit);
-    if (additive) {
-      const next = new Set(selectedNoteIds);
-      if (next.has(hit.id)) next.delete(hit.id); else next.add(hit.id);
-      selectedNoteIds = next;
-      if (!next.has(hit.id)) return; // toggled off — nothing to drag
-    } else if (e.shiftKey) {
+    if (e.shiftKey) {
       selectedNoteIds = new Set([...selectedNoteIds, hit.id]);
     } else if (!selectedNoteIds.has(hit.id)) {
       selectedNoteIds = new Set([hit.id]);
     }
     // Plain click on a note already in a multi-selection: keep the group for
     // a drag, but a click without moving narrows the selection to it.
-    const collapseOnClick = !additive && !e.shiftKey && selectedNoteIds.size > 1;
+    const collapseOnClick = !e.shiftKey && selectedNoteIds.size > 1;
 
-    if (!additive && !e.shiftKey && x >= stepToX(hit.start + hit.length) - 6) {
+    if (!e.shiftKey && x >= stepToX(hit.start + hit.length) - 6) {
       audioEngine.previewNote(channel, hit.pitch, hit);
       beginDragCursor('col-resize');
       drawDrag = {
@@ -253,10 +247,10 @@
   // ── Marquee (drag-select) tool ────────────────────────────────────
   // Every drag draws a selection box, even one starting on a note (notes
   // are never moved from this tool). Plain replaces the selection, Shift
-  // adds, Ctrl toggles. A click without dragging selects the note under
+  // adds. Ctrl+drag runs this from every tool (see gridMousedown). A click without dragging selects the note under
   // the cursor (a zero-size box still overlaps it), or clears on empty space.
   let marquee = $state<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
-  let marqueeMode: 'replace' | 'add' | 'toggle' = 'replace';
+  let marqueeMode: 'replace' | 'add' = 'replace';
 
   function noteOverlapsRect(n: Note, minX: number, maxX: number, minY: number, maxY: number): boolean {
     const nx0 = stepToX(n.start), nx1 = stepToX(n.start + n.length);
@@ -265,7 +259,7 @@
   }
 
   function startMarquee(e: MouseEvent, x: number, y: number) {
-    marqueeMode = (e.ctrlKey || e.metaKey) ? 'toggle' : e.shiftKey ? 'add' : 'replace';
+    marqueeMode = e.shiftKey ? 'add' : 'replace';
     marquee = { x0: x, y0: y, x1: x, y1: y };
     beginDragCursor('crosshair');
   }
@@ -288,12 +282,8 @@
     if (maxX - minX < 3 && maxY - minY < 3 && hits.length === 1) adoptTemplate(hits[0]);
     if (marqueeMode === 'replace') {
       selectedNoteIds = new Set(hitIds);
-    } else if (marqueeMode === 'add') {
-      selectedNoteIds = new Set([...selectedNoteIds, ...hitIds]);
     } else {
-      const next = new Set(selectedNoteIds);
-      for (const id of hitIds) { if (next.has(id)) next.delete(id); else next.add(id); }
-      selectedNoteIds = next;
+      selectedNoteIds = new Set([...selectedNoteIds, ...hitIds]);
     }
     marquee = null;
   }
@@ -354,9 +344,11 @@
   function gridMousedown(e: MouseEvent) {
     if (e.button === 2) { deleteDragStart(e); return; }
     if (e.button !== 0) return;
+    // Ctrl+drag = the Marquee tool's drag, whatever tool is active and
+    // whatever is under the cursor.
+    if (tool === 'marquee' || e.ctrlKey || e.metaKey) { const { x, y } = localPos(e); startMarquee(e, x, y); return; }
     if (tool === 'draw') drawMousedown(e);
-    else if (tool === 'delete') deleteDragStart(e);
-    else { const { x, y } = localPos(e); startMarquee(e, x, y); }
+    else deleteDragStart(e);
   }
   function gridPointermove(e: PointerEvent) {
     if (deleteButtons) {
