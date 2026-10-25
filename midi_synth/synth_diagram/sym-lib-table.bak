@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "esp") (type "KiCad") (uri "/home/miky8745/Programming/Drone/esp_extension/libs/esp.kicad_sym") (options "") (descr ""))
+)

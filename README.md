@@ -1,10 +1,19 @@
+# For half-life
+
+Go to [this README](/midi_synth/README.md) instead.
+
 # 🌿 Allodium
+
+![img](/static/favicon.png)
+
 
 A digital audio workstation (DAW) built with [Tauri v2](https://tauri.app/) and [Svelte 5](https://svelte.dev/).
 
 ## About
 
 Allodium is a desktop DAW with a pattern-based music production workflow. It features a playlist grid, channel rack, piano roll, file explorer, and a built-in sample library. The frontend is a SvelteKit SPA; the native shell and file-system access are handled by a Rust/Tauri backend.
+
+![img](/ui.png)
 
 ## Prerequisites
 
