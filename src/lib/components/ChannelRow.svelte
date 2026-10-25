@@ -2,18 +2,15 @@
   import type { ChannelData, FileDropDetail } from '$lib/types';
   import Dial from './Dial.svelte';
   import ScrollField from './ScrollField.svelte';
-  import ColorWheel from './ColorWheel.svelte';
-  import ChannelMidiOutMenu from './ChannelMidiOutMenu.svelte';
   import { formatChannelLabel } from '$lib/sampleName';
   import { channelHasSound } from '$lib/instrument/channelSound';
   import { channelPlugin } from '$lib/plugins/registry';
-  import SampleFieldMenu from './SampleFieldMenu.svelte';
+  import ChannelRowMenu from './ChannelRowMenu.svelte';
   import { auditionChannel } from '$lib/audition';
   import { channelStore } from '$lib/channelStore.svelte';
   import { channelLoopLength } from '$lib/channelLoop';
   import { formatPan } from '$lib/panFormat';
-  import { hexToRgb, randomColorfulHex } from '$lib/colorUtils';
-  import { portal } from '$lib/portal';
+  import { hexToRgb } from '$lib/colorUtils';
   import MiniNoteRoll from './pianoroll/MiniNoteRoll.svelte';
 
   let {
@@ -66,18 +63,8 @@
   let sampleLabel = $derived(formatChannelLabel(channel));
   let isEmpty = $derived(!channelHasSound(channel) && !channel.plugin);
 
-  // Sample field: its own right-click menu (plugins), separate from the
-  // row's menu. Double-click opens the assigned plugin, or the Piano Roll
+  // Sample field: double-click opens the assigned plugin, or the Piano Roll
   // when there is none.
-  let sampleMenu = $state<{ x: number; y: number } | null>(null);
-
-  function openSampleMenu(e: MouseEvent) {
-    e.preventDefault();
-    e.stopPropagation(); // keep the row's own menu from opening too
-    contextMenu = null;
-    sampleMenu = { x: e.clientX, y: e.clientY };
-  }
-
   // Left press on the sample field plays the channel until release.
   function onSampleMousedown(e: MouseEvent) {
     if (e.button === 0) auditionChannel(channel);
@@ -149,84 +136,13 @@
     return Math.floor(i / 4) % 2; // 0 or 1
   }
 
-  // Mini piano-roll preview (replaces the step buttons for note-based channels)
-
-  // Right-click context menu: fill/rename/recolor/delete. Steps have their
-  // own right-click meaning (erase step, see stepMousedown) and stop this
-  // from firing when right-clicked — see their oncontextmenu handler below.
-  // `menuView` lets Rename/Recolor take over the same menu body instead of
-  // opening a second portal/overlay.
+  // Right-click anywhere on the row (sample field included, steps excepted —
+  // they erase on right-click, see stepMousedown) opens ChannelRowMenu.
   let contextMenu = $state<{ x: number; y: number } | null>(null);
-  let menuView = $state<'main' | 'rename' | 'recolor' | 'midi'>('main');
 
   function openContextMenu(e: MouseEvent) {
     e.preventDefault();
     contextMenu = { x: e.clientX, y: e.clientY };
-    menuView = 'main';
-  }
-
-  function closeContextMenu() {
-    contextMenu = null;
-    menuView = 'main';
-  }
-
-  function deleteChannel() {
-    closeContextMenu();
-    onDelete();
-  }
-
-  // Fill every Nth step (0, N, 2N, …), clearing the rest — a quick way to
-  // sketch out a steady hi-hat/kick pattern. Operates on the channel's own
-  // fixed 16-button step array (not patternLength), same scope as the step
-  // buttons themselves.
-  function fillEvery(n: number) {
-    channel.steps = channel.steps.map((_, i) => i % n === 0);
-    closeContextMenu();
-  }
-
-  // Rename: swaps the menu body for a single text field. Enter commits;
-  // Escape or clicking away (the backdrop) cancels without committing —
-  // deliberately no commit-on-blur here (unlike MixerChannelStrip's rename),
-  // since removing a focused input from the DOM can itself dispatch a
-  // trailing blur that would re-commit a just-cancelled edit (see
-  // MixerChannelStrip.svelte's renameCancelled guard for that exact trap) —
-  // simplest to just not wire blur at all for this short-lived menu widget.
-  let nameDraft = $state('');
-  let nameInputEl = $state<HTMLInputElement | null>(null);
-
-  $effect(() => {
-    if (menuView === 'rename') nameInputEl?.select();
-  });
-
-  function openRename() {
-    nameDraft = channel.name ?? formatChannelLabel(channel);
-    menuView = 'rename';
-  }
-
-  function commitRename() {
-    const trimmed = nameDraft.trim();
-    channel.name = trimmed ? trimmed : null; // empty clears back to the auto-derived sample label
-    closeContextMenu();
-  }
-
-  function renameKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
-    else if (e.key === 'Escape') { e.preventDefault(); closeContextMenu(); }
-  }
-
-  // Recolor: swaps the menu body for a ColorWheel, live-writing
-  // channel.color on every drag (same instant-apply convention as every
-  // other control in the app) rather than needing a separate confirm step.
-  // Seed a default before switching views so ColorWheel (which takes a
-  // plain non-null hex) always has a concrete starting color to bind to.
-  function openRecolor() {
-    if (channel.color === null) channel.color = '#e6b07f';
-    menuView = 'recolor';
-  }
-
-  function recolorRandomly() {
-    channel.color = randomColorfulHex();
-    closeContextMenu();
   }
 </script>
 
@@ -274,10 +190,9 @@
     bind:this={dropEl}
     onmousedown={onSampleMousedown}
     ondblclick={onSampleDblclick}
-    oncontextmenu={openSampleMenu}
     role="button"
     tabindex="-1"
-    aria-label="Sample field (press to hear, double-click to open, right-click for plugins)"
+    aria-label="Sample field (press to hear, double-click to open, right-click for the channel menu)"
   >
     <span class="sample-name" style={dropTextColor ? `color:${dropTextColor};` : ''}>{sampleLabel}</span>
   </div>
@@ -315,43 +230,8 @@
   </div>
 </div>
 
-{#if sampleMenu}
-  <SampleFieldMenu {channel} x={sampleMenu.x} y={sampleMenu.y} onClose={() => (sampleMenu = null)} />
-{/if}
-
 {#if contextMenu}
-  <div class="ctx-root" use:portal>
-    <div class="ctx-backdrop" onmousedown={closeContextMenu} oncontextmenu={(e) => e.preventDefault()} role="presentation"></div>
-    <div class="ctx-menu" class:ctx-menu--wide={menuView === 'recolor' || menuView === 'midi'} style="left:{contextMenu.x}px; top:{contextMenu.y}px;" role="menu">
-      {#if menuView === 'main'}
-        <button class="ctx-item" role="menuitem" onclick={() => fillEvery(2)}>Fill every 2 steps</button>
-        <button class="ctx-item" role="menuitem" onclick={() => fillEvery(4)}>Fill every 4 steps</button>
-        <button class="ctx-item" role="menuitem" onclick={() => fillEvery(8)}>Fill every 8 steps</button>
-        <div class="ctx-sep"></div>
-        <button class="ctx-item" role="menuitem" onclick={openRename}>Rename</button>
-        <button class="ctx-item" role="menuitem" onclick={openRecolor}>Recolor</button>
-        <button class="ctx-item" role="menuitem" onclick={recolorRandomly}>Recolor randomly</button>
-        <div class="ctx-sep"></div>
-        <button class="ctx-item" role="menuitem" onclick={() => (menuView = 'midi')}>MIDI out…{channel.midiOutPort ? ` (ch ${channel.midiOutChannel})` : ''}</button>
-        <div class="ctx-sep"></div>
-        <button class="ctx-item ctx-item--danger" role="menuitem" onclick={deleteChannel}>Delete channel</button>
-      {:else if menuView === 'rename'}
-        <input
-          class="ctx-input"
-          type="text"
-          bind:value={nameDraft}
-          bind:this={nameInputEl}
-          onkeydown={renameKeydown}
-          placeholder="Channel name"
-        />
-      {:else if menuView === 'recolor' && channel.color}
-        <ColorWheel bind:value={channel.color} />
-        <button class="ctx-item ctx-done" role="menuitem" onclick={closeContextMenu}>Done</button>
-      {:else if menuView === 'midi'}
-        <ChannelMidiOutMenu {channel} onDone={closeContextMenu} />
-      {/if}
-    </div>
-  </div>
+  <ChannelRowMenu {channel} x={contextMenu.x} y={contextMenu.y} onClose={() => (contextMenu = null)} {onDelete} />
 {/if}
 
 <style>
@@ -476,82 +356,4 @@
   .step:hover:not(.step--on) { filter: brightness(1.4); }
 
   .step--playing { outline: 2px solid rgba(255,255,255,0.55); outline-offset: -2px; }
-
-  /* Context menu */
-  .ctx-root {
-    position: fixed;
-    inset: 0;
-    z-index: 10000;
-  }
-
-  .ctx-backdrop {
-    position: absolute;
-    inset: 0;
-  }
-
-  .ctx-menu {
-    position: fixed;
-    background: #272a33;
-    border: 1px solid var(--explorer-border, #34373f);
-    border-radius: 8px;
-    box-shadow: 0 6px 18px rgba(0,0,0,0.5);
-    min-width: 140px;
-    padding: 3px;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .ctx-menu--wide {
-    min-width: 190px;
-  }
-
-  .ctx-item {
-    background: transparent;
-    border: none;
-    color: rgba(255,255,255,0.7);
-    font-size: 12px;
-    text-align: left;
-    padding: 5px 10px;
-    border-radius: 5px;
-    cursor: pointer;
-    transition: background 0.08s, color 0.08s;
-  }
-
-  .ctx-item:hover {
-    background: rgba(255,255,255,0.07);
-    color: rgba(255,255,255,0.95);
-  }
-
-  .ctx-item--danger:hover {
-    background: rgba(220,50,50,0.18);
-    color: #f08484;
-  }
-
-  .ctx-sep {
-    height: 1px;
-    margin: 4px 6px;
-    background: rgba(255,255,255,0.08);
-  }
-
-  .ctx-input {
-    width: 160px;
-    margin: 2px;
-    padding: 5px 8px;
-    font-size: 12px;
-    color: var(--main-text);
-    background: rgba(0,0,0,0.25);
-    border: 1px solid rgba(255,255,255,0.15);
-    border-radius: 5px;
-    outline: none;
-  }
-
-  .ctx-input:focus {
-    border-color: var(--accent);
-  }
-
-  .ctx-done {
-    margin-top: 2px;
-    text-align: center;
-    color: var(--accent);
-  }
 </style>

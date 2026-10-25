@@ -708,7 +708,7 @@ class AudioEngine {
     if (usesPreset(ch)) {
       const preset = await loadPreset(inst.presetPath);
       const shape = instrumentShape(inst, preset);
-      return { shape, hits: preset ? presetHits(preset, pitch, velocity, shape) : [] };
+      return { shape, hits: preset ? presetHits(preset, pitch, velocity, shape, ch.id) : [] };
     }
     const shape = instrumentShape(inst, null);
     const picked = await this.resolvePitched(ch, pitch);

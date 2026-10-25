@@ -2,10 +2,12 @@
   import { onMount } from 'svelte';
   import { forgetPresets, listPresets } from '$lib/instrument/presetLoader';
   import { presetNameFromPath } from '$lib/instrument/sfz';
+  import { packStore } from '$lib/instrument/packs/packStore.svelte';
 
-  // Every .sfz under data/instruments/, grouped by its first folder
-  // (the category). Clicking one loads it onto the channel.
-  let { currentPath, onpick }: { currentPath: string; onpick: (path: string) => void } = $props();
+  // Every .sfz under data/instruments/, grouped by its first folder (the
+  // category; installed pack instruments as "<Pack> · <category>").
+  // Clicking one loads it onto the channel; "Get more…" opens the pack view.
+  let { currentPath, onpick, onGetMore }: { currentPath: string; onpick: (path: string) => void; onGetMore: () => void } = $props();
 
   let paths = $state<string[]>([]);
   let query = $state('');
@@ -21,7 +23,15 @@
     }
   }
 
-  onMount(refresh);
+  onMount(() => {
+    void packStore.loadCatalog(); // pack category names
+    void refresh();
+  });
+
+  // Rescan after a pack install/removal.
+  $effect(() => {
+    if (packStore.revision > 0) void refresh();
+  });
 
   let groups = $derived.by(() => {
     const q = query.trim().toLowerCase();
@@ -29,11 +39,13 @@
     for (const p of paths) {
       if (q && !p.toLowerCase().includes(q)) continue;
       const parts = p.split('/');
-      const category = parts.length > 2 ? parts[1] : 'Uncategorized';
+      const category = packStore.categoryOf(p) ?? (parts.length > 2 ? parts[1] : 'Uncategorized');
       if (!map.has(category)) map.set(category, []);
       map.get(category)!.push(p);
     }
-    return [...map.entries()];
+    // Bundled categories first, then installed packs.
+    const isPack = (c: string) => c.includes(' · ');
+    return [...map.entries()].sort((a, b) => Number(isPack(a[0])) - Number(isPack(b[0])) || a[0].localeCompare(b[0]));
   });
 </script>
 
@@ -62,6 +74,7 @@
       {/each}
     {/each}
   </div>
+  <button class="pb-more" onclick={onGetMore}>Get more instruments…</button>
 </div>
 
 <style>
@@ -134,6 +147,20 @@
   .pb-item:hover { background: var(--btn-hover); }
   .pb-item--on,
   .pb-item--on:hover {
+    background: var(--accent);
+    color: var(--accent-text);
+  }
+  .pb-more {
+    margin: 6px;
+    height: 26px;
+    font-size: 12px;
+    border-radius: 6px;
+    border: 1px solid var(--accent);
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .pb-more:hover {
     background: var(--accent);
     color: var(--accent-text);
   }

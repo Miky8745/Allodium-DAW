@@ -20,6 +20,14 @@ export interface SfzRegion {
   seqPosition: number;
   lorand: number;
   hirand: number;
+  pitchKeytrack: number; // cents per key (100 = normal; 0 = fixed pitch, e.g. drums)
+  ampVeltrack: number;   // 0..1 — how much velocity affects loudness (1 = fully)
+  // Velocity crossfades (xfin_/xfout_lovel/hivel), 1..127; null = none.
+  xfin: [number, number] | null;
+  xfout: [number, number] | null;
+  // Keyswitch: the region only plays while the last switch key pressed
+  // (within the group's sw_lokey..sw_hikey) is `swLast`; null = always.
+  swLast: number | null;
   opcodes: Record<string, string>; // effective (inherited) opcodes, for envelope/filter/macro lookups
 }
 
@@ -29,10 +37,18 @@ export interface SfzControl {
   value: number; // default 0..1 (set_ccN / 127)
 }
 
+export interface SfzKeyswitches {
+  lo: number;      // keys lo..hi are switches, not notes
+  hi: number;
+  initial: number; // sw_default
+  labels: Map<number, string>;
+}
+
 export interface SfzInstrument {
   path: string;
   name: string;
   regions: SfzRegion[];
+  keyswitches: SfzKeyswitches | null;
   controls: SfzControl[]; // labeled CCs, in CC order — these become the macro knobs
 }
 
@@ -135,6 +151,11 @@ function buildRegion(ops: Record<string, string>, baseDir: string, group: number
     seqPosition: Math.max(1, toNum(ops.seq_position, 1)),
     lorand: toNum(ops.lorand, 0),
     hirand: toNum(ops.hirand, 1),
+    pitchKeytrack: toNum(ops.pitch_keytrack, 100),
+    ampVeltrack: Math.max(0, Math.min(1, toNum(ops.amp_veltrack, 100) / 100)),
+    xfin: ops.xfin_hivel !== undefined ? [toNum(ops.xfin_lovel, 0), toNum(ops.xfin_hivel, 0)] : null,
+    xfout: ops.xfout_lovel !== undefined ? [toNum(ops.xfout_lovel, 127), toNum(ops.xfout_hivel, 127)] : null,
+    swLast: ops.sw_last !== undefined ? toKey(ops.sw_last, NaN) : null,
     opcodes: ops,
   };
 }
@@ -186,5 +207,21 @@ export function parseSfz(text: string, path: string): SfzInstrument {
   }
   controls.sort((a, b) => a.cc - b.cc);
 
-  return { path, name: presetNameFromPath(path), regions, controls };
+  return { path, name: presetNameFromPath(path), regions, controls, keyswitches: collectKeyswitches(regions) };
+}
+
+// The switch-key range/default/labels, from whichever regions declare them.
+function collectKeyswitches(regions: SfzRegion[]): SfzKeyswitches | null {
+  let ks: SfzKeyswitches | null = null;
+  for (const r of regions) {
+    const o = r.opcodes;
+    if (o.sw_lokey === undefined || o.sw_hikey === undefined) continue;
+    const lo = toKey(o.sw_lokey, NaN), hi = toKey(o.sw_hikey, NaN);
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue;
+    ks ??= { lo, hi, initial: toKey(o.sw_default, lo), labels: new Map() };
+    ks.lo = Math.min(ks.lo, lo);
+    ks.hi = Math.max(ks.hi, hi);
+    if (r.swLast !== null && o.sw_label && !ks.labels.has(r.swLast)) ks.labels.set(r.swLast, o.sw_label);
+  }
+  return ks;
 }

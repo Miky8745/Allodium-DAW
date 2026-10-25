@@ -4,8 +4,9 @@ import { defaultInstrument } from '$lib/instrument/types';
 import { instrumentWindow } from '$lib/instrument/instrumentWindow.svelte';
 
 // Plugins that can be assigned to a channel's sample field (right-click the
-// sample field → plugin menu; double-click opens the assigned one). Built-in
-// for now — the shape is meant to also fit external plugins later.
+// row → Plugins section of ChannelRowMenu; double-click the sample field
+// opens the assigned one). Built-in for now — the shape is meant to also fit
+// external plugins later.
 // A channel stores the plugin's `id` in ChannelData.plugin ('' = none).
 export interface PluginDef {
   id: string;

@@ -74,7 +74,10 @@ export function buildInstrumentVoice(ctx: BaseAudioContext, dest: AudioNode, buf
     src.connect(gain).connect(panner).connect(dest);
   }
 
-  const peak = Math.max(0, Math.min(2, p.volume * hit.gain * dbToGain(shape.gainDb)));
+  // Not clamped to the channel's 0..2 volume range: SFZ libraries routinely
+  // boost quiet recordings by 20–30 dB per region (the master limiter
+  // still guards the output).
+  const peak = Math.max(0, Math.min(64, p.volume * hit.gain * dbToGain(shape.gainDb)));
   const release = shape.release * p.releaseScale;
   let end: number;
   if (hit.oneShot && !hit.loop) {

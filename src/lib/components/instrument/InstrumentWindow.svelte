@@ -1,6 +1,7 @@
 <script lang="ts">
   import FloatingWindow, { type WorkspaceBounds } from '../FloatingWindow.svelte';
   import PresetBrowser from './PresetBrowser.svelte';
+  import PackBrowser from './PackBrowser.svelte';
   import InstrumentPanel from './InstrumentPanel.svelte';
   import { channelStore } from '$lib/channelStore.svelte';
   import { formatSourceLabel } from '$lib/sampleName';
@@ -13,6 +14,8 @@
   let { workspaceBounds }: { workspaceBounds: WorkspaceBounds } = $props();
 
   let channel = $derived(channelStore.selectedChannel);
+  // 'packs' = the full-width "Get more instruments" view.
+  let view = $state<'edit' | 'packs'>('edit');
 
   // Shown with nothing selected (e.g. the channel was deleted): target the
   // first channel.
@@ -21,6 +24,11 @@
       channelStore.selectedChannelId = channelStore.channels[0].id;
     }
   });
+
+  async function loadFromPacks(path: string) {
+    view = 'edit';
+    await pick(path);
+  }
 
   async function pick(path: string) {
     if (!channel) return;
@@ -70,14 +78,20 @@
     </div>
   {/snippet}
 
-  <div class="in-body">
-    <PresetBrowser currentPath={channel?.instrument.enabled ? channel.instrument.presetPath : ''} onpick={pick} />
-    {#if channel}
-      <InstrumentPanel {channel} />
-    {:else}
-      <p class="in-empty">Add a channel in the Channel Rack to use an instrument.</p>
-    {/if}
-  </div>
+  {#if view === 'packs'}
+    <div class="in-body in-body--full">
+      <PackBrowser onBack={() => (view = 'edit')} onLoad={loadFromPacks} />
+    </div>
+  {:else}
+    <div class="in-body">
+      <PresetBrowser currentPath={channel?.instrument.enabled ? channel.instrument.presetPath : ''} onpick={pick} onGetMore={() => (view = 'packs')} />
+      {#if channel}
+        <InstrumentPanel {channel} />
+      {:else}
+        <p class="in-empty">Add a channel in the Channel Rack to use an instrument.</p>
+      {/if}
+    </div>
+  {/if}
 </FloatingWindow>
 
 <style>
@@ -139,6 +153,9 @@
     grid-template-columns: 190px 1fr;
     background: var(--main-bg, #1e212a);
     overflow: hidden;
+  }
+  .in-body--full {
+    grid-template-columns: 1fr;
   }
   .in-empty {
     margin: 16px;

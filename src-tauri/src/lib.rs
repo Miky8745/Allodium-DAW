@@ -2,11 +2,13 @@ mod capture;
 mod debug;
 mod instruments;
 mod midi;
+mod packs;
 mod preferences;
 mod project;
 use capture::{system_audio_start, system_audio_stop};
 use debug::{debug_config, debug_exit, perf_log};
 use instruments::{list_presets, read_text_file};
+use packs::{cancel_pack_install, delete_pack_files, install_pack_files, PackInstallState};
 use midi::{midi_list_ports, midi_schedule, midi_send, midi_set_inputs, midi_set_outputs, midi_stop_all};
 use preferences::{load_preferences, save_preferences};
 use project::{load_history, load_project, save_history, save_project};
@@ -219,6 +221,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(midi::new_state())
         .manage(capture::CaptureState::default())
+        .manage(PackInstallState::default())
         .setup(|app| {
             let state = app.state::<midi::SharedMidi>().inner().clone();
             midi::start_threads(app.handle().clone(), state);
@@ -243,6 +246,9 @@ pub fn run() {
             list_dir_files,
             read_text_file,
             list_presets,
+            install_pack_files,
+            cancel_pack_install,
+            delete_pack_files,
             save_project,
             load_project,
             save_history,

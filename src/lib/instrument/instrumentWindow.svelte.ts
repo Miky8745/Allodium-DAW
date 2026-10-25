@@ -5,7 +5,7 @@ export const INSTRUMENT_WINDOW_ID = 'instrument';
 
 // Open/closed state of the Bloom instrument window (ephemeral UI state, like
 // the other windows' show flags). Lives in a store rather than +page.svelte
-// so the plugin registry (sample-field double-click / plugin menu) can open
+// so the plugin registry (sample-field double-click / row menu's Plugins section) can open
 // it directly.
 class InstrumentWindowStore {
   show = $state(false);

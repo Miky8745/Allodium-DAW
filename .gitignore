@@ -16,3 +16,6 @@ clear-cache.sh
 .vscode/
 # Third-party sample content kept locally only — never commit
 data/samples/local_samples/
+
+# Downloaded Bloom instrument packs (Get more…) — large, fetched at runtime
+data/instruments/packs/

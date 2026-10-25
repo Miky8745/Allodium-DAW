@@ -58,9 +58,12 @@ Dragging a file/folder from `FileExplorer` and dropping it anywhere in the Chann
 
 ## Channel Rack row context menu
 
-Right-clicking a `ChannelRow` (anywhere except the step buttons, which keep their own right-click-to-erase-step meaning) opens `ChannelRow.svelte`'s own context menu, portalled onto `<body>` the same way as `DragTooltip.svelte`. A local `menuView: 'main' | 'rename' | 'recolor'` lets Rename/Recolor take over the same menu body instead of opening a second portal:
+Right-clicking a `ChannelRow` (anywhere except the step buttons, which keep their own right-click-to-erase-step meaning) — including the sample field, which used to have its own separate plugin menu — opens `ChannelRowMenu.svelte`, portalled onto `<body>` the same way as `DragTooltip.svelte`. A local `menuView: 'main' | 'rename' | 'recolor' | 'midi'` lets Rename/Recolor/MIDI out take over the same menu body instead of opening a second portal:
 
 ```
+PLUGINS          (every registry plugin, assigned one ✓ — picking assigns + opens it)
+Remove plugin    (only when one is assigned)
+─────────
 Fill every 2 steps
 Fill every 4 steps
 Fill every 8 steps

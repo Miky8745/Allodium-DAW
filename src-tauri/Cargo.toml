@@ -26,4 +26,5 @@ quick-xml = { version = "0.41.0", features = ["serialize"] }
 midir = "0.10"
 libpulse-binding = "2"
 libpulse-simple-binding = "2"
+ureq = "2"
 
