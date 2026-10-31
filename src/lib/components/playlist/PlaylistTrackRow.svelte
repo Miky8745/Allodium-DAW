@@ -179,14 +179,14 @@
     height: var(--track-h);
     flex-shrink: 0;
     border-bottom: 1px solid rgba(0, 0, 0, 0.35);
-    cursor: var(--cursor-brush); /* Draw tool: lanes draw the active pattern */
+    cursor: cell; /* Draw tool: lanes draw the active pattern */
   }
 
   /* Delete / Drag-select tools: their cursor over lanes and blocks alike. */
   .track-row--delete,
   .track-row--delete .beat-cell,
   .track-row--delete .placed-pattern,
-  .track-row--delete .placed-clip { cursor: var(--cursor-eraser); }
+  .track-row--delete .placed-clip { cursor: not-allowed; }
 
   .track-row--marquee,
   .track-row--marquee .beat-cell,

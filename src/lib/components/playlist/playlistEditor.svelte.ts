@@ -306,7 +306,7 @@ export class PlaylistEditor {
 
   #startDelete(e: PointerEvent, bit: number) {
     this.#deleteBit = bit;
-    beginDragCursor('var(--cursor-eraser)');
+    beginDragCursor('not-allowed');
     this.#deleteAt(e.clientX, e.clientY);
   }
 

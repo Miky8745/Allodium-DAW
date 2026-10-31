@@ -300,7 +300,7 @@
 
   function deleteDragStart(e: MouseEvent) {
     deleteButtons = e.button === 2 ? 2 : 1;
-    beginDragCursor('var(--cursor-eraser)');
+    beginDragCursor('not-allowed');
     const { x, y } = localPos(e);
     deleteAt(x, y);
   }
@@ -628,8 +628,8 @@
     cursor: crosshair;
   }
 
-  .grid-content--draw { cursor: var(--cursor-brush); }
-  .grid-content--delete { cursor: var(--cursor-eraser); }
+  .grid-content--draw { cursor: cell; }
+  .grid-content--delete { cursor: not-allowed; }
   .grid-content--edge { cursor: col-resize; }
 
   .grid-row {

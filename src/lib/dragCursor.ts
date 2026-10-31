@@ -5,8 +5,8 @@
 //
 // Cursor conventions: `move` = drag in every direction (notes, placements,
 // windows, files), `ew-resize` = horizontal-only move (overview windows),
-// `col-resize` = extending/resizing an edge, `var(--cursor-brush)` /
-// `var(--cursor-eraser)` = Piano Roll draw/delete tools.
+// `col-resize` = extending/resizing an edge, `cell`/`not-allowed` = Piano
+// Roll draw/delete tools.
 
 export function beginDragCursor(cursor: string) {
   const root = document.documentElement;
