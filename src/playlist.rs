@@ -287,7 +287,7 @@ impl Render for Playlist {
                     .w(px(width))
                     .h(px(ROW_H - 2.0))
                     .rounded(theme::RADIUS_SM)
-                    .bg(theme::ACCENT_DIM)
+                    .bg(theme::pattern_color(placement.pattern_id))
                     .flex()
                     .items_center()
                     .px_1()
@@ -303,6 +303,8 @@ impl Render for Playlist {
             let top = placement.track_id as f32 * ROW_H - scroll_y;
             let width = (length as f32 * BEAT_W - 2.0).max(1.0);
             let alpha = (1.0 - progress).max(0.0);
+            let mut dying_color = theme::WARM_ACCENT;
+            dying_color.a = alpha;
             block_layer = block_layer.child(
                 div()
                     .absolute()
@@ -311,7 +313,7 @@ impl Render for Playlist {
                     .w(px(width))
                     .h(px(ROW_H - 2.0))
                     .rounded(theme::RADIUS_SM)
-                    .bg(Hsla { h: 4.0 / 360.0, s: 0.75, l: 0.55, a: alpha })
+                    .bg(dying_color)
                     .flex()
                     .items_center()
                     .px_1()
@@ -335,7 +337,8 @@ impl Render for Playlist {
                     .flex()
                     .items_center()
                     .text_size(px(10.0))
-                    .bg(if is_selected { theme::ACCENT } else { theme::BG_PILL })
+                    .bg(if is_selected { theme::pattern_color(id) } else { theme::BG_PILL })
+                    .text_color(if is_selected { theme::ACCENT_TEXT } else { theme::ACCENT_DIM })
                     .cursor_pointer()
                     .child(name.clone())
                     .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {

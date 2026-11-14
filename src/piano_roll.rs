@@ -250,10 +250,6 @@ impl Render for PianoRoll {
         let rack = self.channel_rack.read(cx);
         let playing = rack.is_playing();
         let current_step = if playing { rack.current_step() } else { -1.0 };
-        let channel_name = self
-            .loaded_channel_id
-            .and_then(|id| rack.channels().iter().find(|c| c.id == id))
-            .map(|c| if c.name.is_empty() { "Drop sample".to_string() } else { c.name.clone() });
 
         let notes = self.notes.clone();
         let dying: Vec<(Note, f32)> = self
@@ -272,26 +268,7 @@ impl Render for PianoRoll {
             .bg(theme::BG_APP)
             .child(
                 div()
-                    .h(px(24.0))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .px_2()
-                    .bg(theme::BG_PANEL)
-                    .border_b_1()
-                    .border_color(theme::BORDER)
-                    .text_size(px(11.0))
-                    .text_color(theme::ACCENT_DIM)
-                    .font_family(theme::FONT_UI)
-                    .child(match &channel_name {
-                        Some(name) => format!("Piano Roll — {name}"),
-                        None => "Piano Roll — no channel selected".to_string(),
-                    }),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .w_full()
+                    .size_full()
                     .overflow_hidden()
                     .bg(rgb(0x1a1a1a))
                     .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
@@ -436,7 +413,7 @@ fn paint_grid(
     // Dying notes: a brief flash that fades and shrinks slightly.
     for (note, progress) in dying {
         let alpha = (1.0 - progress).max(0.0);
-        let mut color: Hsla = rgb(0xff6a3d).into();
+        let mut color = theme::WARM_ACCENT;
         color.a = alpha;
         paint_note(window, origin, scroll_x, scroll_y, note, color, alpha);
     }

@@ -15,7 +15,7 @@ use crate::channel_rack::ChannelRack;
 use crate::theme;
 
 const STRIP_W: f32 = 76.0;
-const FADER_H: f32 = 110.0;
+const DEFAULT_FADER_H: f32 = 110.0;
 const FADER_W: f32 = 18.0;
 
 #[derive(Clone, Copy)]
@@ -34,11 +34,23 @@ struct FaderDrag {
 pub struct Mixer {
     channel_rack: Entity<ChannelRack>,
     drag: Option<FaderDrag>,
+    /// The panel's available height minus chrome, computed by `AppShell`
+    /// from the floating panel's actual (resizable) size each frame —
+    /// no DOM-measurement trick needed, since the parent already owns
+    /// the panel's exact size as plain Rust state.
+    fader_height: gpui::Pixels,
 }
 
 impl Mixer {
     pub fn new(channel_rack: Entity<ChannelRack>, _window: &mut Window, _cx: &mut Context<Self>) -> Self {
-        Self { channel_rack, drag: None }
+        Self { channel_rack, drag: None, fader_height: px(DEFAULT_FADER_H) }
+    }
+
+    pub fn set_fader_height(&mut self, height: gpui::Pixels, cx: &mut Context<Self>) {
+        if self.fader_height != height {
+            self.fader_height = height;
+            cx.notify();
+        }
     }
 
     fn begin_drag(&mut self, kind: FaderKind, start_y: f32, cx: &Context<Self>) {
@@ -56,7 +68,7 @@ impl Mixer {
         // Dragging up increases the value, so the delta is inverted.
         let height = match drag.kind {
             FaderKind::TrackPan(_) => 1.0,
-            _ => FADER_H,
+            _ => f32::from(self.fader_height),
         };
         let delta = (drag.start_y - current_y) / height;
         let new_value = (drag.start_value + delta as f64).clamp(0.0, 1.0);
@@ -81,10 +93,10 @@ impl Mixer {
 /// from mouse-down, not an absolute position — GPUI's plain `div()`
 /// doesn't hand event handlers its own screen bounds, same reasoning as
 /// `channel_rack.rs`'s `slider`).
-fn fader(value: f64, kind: FaderKind, cx: &Context<Mixer>) -> impl IntoElement {
-    let fill_h = (value.clamp(0.0, 1.0) as f32) * FADER_H;
+fn fader(value: f64, kind: FaderKind, height: gpui::Pixels, cx: &Context<Mixer>) -> impl IntoElement {
+    let fill_h = (value.clamp(0.0, 1.0) as f32) * f32::from(height);
     div()
-        .h(px(FADER_H))
+        .h(height)
         .w(px(FADER_W))
         .rounded(px(4.0))
         .bg(theme::BG_PANEL)
@@ -132,7 +144,7 @@ impl Render for Mixer {
                 .rounded(theme::RADIUS_SM)
                 .bg(theme::BG_PILL)
                 .child(div().text_size(px(11.0)).text_color(theme::ACCENT).child("Master"))
-                .child(fader(master_volume, FaderKind::MasterVolume, cx)),
+                .child(fader(master_volume, FaderKind::MasterVolume, self.fader_height, cx)),
         );
 
         for t in &tracks {
@@ -166,7 +178,7 @@ impl Render for Mixer {
                             ),
                     )
                     .child(pan_dot(t.pan, id, cx))
-                    .child(fader(t.volume, FaderKind::TrackVolume(id), cx))
+                    .child(fader(t.volume, FaderKind::TrackVolume(id), self.fader_height, cx))
                     .child(
                         div()
                             .flex()
@@ -174,9 +186,9 @@ impl Render for Mixer {
                             .child(
                                 div()
                                     .id(("mix-mute", id as usize))
-                                    .w(px(24.0))
+                                    .w(px(18.0))
                                     .h(px(18.0))
-                                    .rounded(px(4.0))
+                                    .rounded_full()
                                     .flex()
                                     .items_center()
                                     .justify_center()

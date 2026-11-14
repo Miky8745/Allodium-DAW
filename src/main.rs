@@ -1,5 +1,6 @@
 mod audio;
 mod channel_rack;
+mod floating_panel;
 mod mixer;
 mod perf;
 mod piano_roll;

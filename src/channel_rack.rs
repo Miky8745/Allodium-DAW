@@ -535,7 +535,15 @@ impl Render for ChannelRack {
             let mut step_row = div().flex().flex_row().gap_1();
             for (i, on) in steps.iter().enumerate().take(STEP_COUNT) {
                 let is_current = playing && current_step == i as i64;
-                let bg = if *on { theme::ACCENT } else { theme::BG_PANEL };
+                // 4-step beat-group banding, matching the Piano Roll's
+                // own beat-group shading — the two grids should read as
+                // one system, not two unrelated ones.
+                let in_even_group = (i / 4) % 2 == 0;
+                let bg = match (*on, in_even_group) {
+                    (true, _) => theme::ACCENT,
+                    (false, true) => theme::BG_PANEL,
+                    (false, false) => theme::BG_PILL,
+                };
                 step_row = step_row.child(
                     div()
                         .id(("step", (id as usize) * 100 + i))
@@ -576,9 +584,9 @@ impl Render for ChannelRack {
                 .child(
                     div()
                         .id(("mute", id as usize))
-                        .w(px(28.0))
+                        .w(px(20.0))
                         .h(px(20.0))
-                        .rounded(px(4.0))
+                        .rounded_full()
                         .flex()
                         .items_center()
                         .justify_center()
@@ -647,14 +655,16 @@ impl Render for ChannelRack {
             .child(
                 div()
                     .id("play-stop")
-                    .w(px(60.0))
+                    .w(px(72.0))
                     .h(px(24.0))
                     .rounded(theme::RADIUS_SM)
                     .flex()
                     .items_center()
                     .justify_center()
+                    .gap_1()
                     .bg(if playing { theme::ACCENT } else { theme::BG_PILL })
                     .cursor_pointer()
+                    .child(if playing { "■" } else { "▶" })
                     .child(if playing { "Stop" } else { "Play" })
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_play(cx))),
             )
