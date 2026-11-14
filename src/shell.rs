@@ -10,19 +10,23 @@ use gpui::{AppContext, Context, Entity, IntoElement, ParentElement, Render, Styl
 use crate::audio::AudioEngine;
 use crate::channel_rack::ChannelRack;
 use crate::perf::FrameStats;
+use crate::piano_roll::PianoRoll;
 use crate::theme;
 
 pub struct AppShell {
     frame_stats: FrameStats,
     channel_rack: Entity<ChannelRack>,
+    piano_roll: Entity<PianoRoll>,
 }
 
 impl AppShell {
     pub fn new(engine: Arc<AudioEngine>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let channel_rack = cx.new(|cx| ChannelRack::new(engine, window, cx));
+        let piano_roll = cx.new(|cx| PianoRoll::new(channel_rack.clone(), window, cx));
         Self {
             frame_stats: FrameStats::new(),
             channel_rack,
+            piano_roll,
         }
     }
 }
@@ -72,7 +76,24 @@ impl Render for AppShell {
                             .border_r_1()
                             .border_color(theme::BORDER),
                     )
-                    .child(div().flex_1().h_full().bg(theme::BG_APP).child(self.channel_rack.clone())),
+                    .child(
+                        // Workspace: Channel Rack on top, Piano Roll below.
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .h(theme::CHANNEL_RACK_H)
+                                    .w_full()
+                                    .bg(theme::BG_APP)
+                                    .border_b_1()
+                                    .border_color(theme::BORDER)
+                                    .child(self.channel_rack.clone()),
+                            )
+                            .child(div().flex_1().w_full().child(self.piano_roll.clone())),
+                    ),
             )
     }
 }

@@ -1,6 +1,7 @@
 mod audio;
 mod channel_rack;
 mod perf;
+mod piano_roll;
 mod project;
 mod shell;
 mod theme;

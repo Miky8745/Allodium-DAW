@@ -41,6 +41,7 @@ pub const RADIUS_LG: Pixels = px(14.0);
 pub const TOOLBAR_ROW1_H: Pixels = px(50.0);
 pub const TOOLBAR_ROW2_H: Pixels = px(26.0);
 pub const LEFT_PANEL_W: Pixels = px(220.0);
+pub const CHANNEL_RACK_H: Pixels = px(260.0);
 
 // Typography. JetBrains Mono is the desktop's own bar font; fall back to
 // plain "JetBrains Mono" if the Nerd Font variant isn't resolvable by GPUI's

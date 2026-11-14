@@ -38,6 +38,7 @@ pub struct ChannelRack {
     samples: HashMap<String, Arc<SampleBuffer>>,
     next_channel_id: u32,
     drag: Option<SliderDrag>,
+    selected_channel_id: Option<u32>,
 }
 
 impl ChannelRack {
@@ -58,6 +59,7 @@ impl ChannelRack {
         }
 
         let next_channel_id = project.channels.items.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+        let selected_channel_id = project.channels.items.first().map(|c| c.id);
 
         let mut rack = Self {
             engine,
@@ -65,9 +67,70 @@ impl ChannelRack {
             samples,
             next_channel_id,
             drag: None,
+            selected_channel_id,
         };
         rack.push_snapshot();
         rack
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.engine.is_playing()
+    }
+
+    pub fn current_step(&self) -> f64 {
+        self.engine.current_step()
+    }
+
+    pub fn channels(&self) -> &[Channel] {
+        &self.project.channels.items
+    }
+
+    pub fn selected_channel_id(&self) -> Option<u32> {
+        self.selected_channel_id
+    }
+
+    pub fn select_channel(&mut self, channel_id: u32, cx: &mut Context<Self>) {
+        self.selected_channel_id = Some(channel_id);
+        cx.notify();
+    }
+
+    /// Steps in the currently selected pattern, same formula `build_snapshot`
+    /// uses for the scheduler, so the Piano Roll's grid width and the
+    /// engine's loop point always agree.
+    pub fn pattern_length_steps(&self) -> u32 {
+        self.project
+            .patterns
+            .items
+            .iter()
+            .find(|p| p.id == self.project.selected_pattern_id)
+            .map(|p| (p.length_beats * 4.0).round().max(1.0) as u32)
+            .unwrap_or(16)
+    }
+
+    pub fn notes_for(&self, channel_id: u32) -> Vec<project::Note> {
+        let pattern_id = self.project.selected_pattern_id;
+        self.project
+            .content
+            .items
+            .iter()
+            .find(|e| e.pattern_id == pattern_id && e.channel_id == channel_id)
+            .map(|e| e.notes.clone())
+            .unwrap_or_default()
+    }
+
+    /// Replaces a channel's notes and immediately feeds the engine a fresh
+    /// snapshot so an edit is audible mid-playback, but does *not* write to
+    /// disk — call `persist` for that, same split as the volume/pan slider
+    /// drag uses, so a fast note-drag doesn't hit the filesystem every frame.
+    pub fn update_notes(&mut self, channel_id: u32, notes: Vec<project::Note>, cx: &mut Context<Self>) {
+        let entry = self.content_for(channel_id);
+        entry.notes = notes;
+        self.push_snapshot();
+        cx.notify();
+    }
+
+    pub fn persist(&self) {
+        self.save();
     }
 
     fn push_snapshot(&mut self) {
@@ -149,6 +212,9 @@ impl ChannelRack {
     fn remove_channel(&mut self, channel_id: u32, cx: &mut Context<Self>) {
         self.project.channels.items.retain(|c| c.id != channel_id);
         self.project.content.items.retain(|e| e.channel_id != channel_id);
+        if self.selected_channel_id == Some(channel_id) {
+            self.selected_channel_id = self.project.channels.items.first().map(|c| c.id);
+        }
         self.push_snapshot();
         self.save();
         cx.notify();
@@ -192,6 +258,7 @@ impl ChannelRack {
             notes: vec![],
         });
 
+        self.selected_channel_id = Some(id);
         self.push_snapshot();
         self.save();
         cx.notify();
@@ -303,6 +370,7 @@ impl Render for ChannelRack {
             }
 
             let name_label = if ch.name.is_empty() { "Drop sample".to_string() } else { ch.name.clone() };
+            let is_selected = self.selected_channel_id == Some(id);
             let row = div()
                 .flex()
                 .flex_row()
@@ -311,13 +379,17 @@ impl Render for ChannelRack {
                 .p_2()
                 .rounded(theme::RADIUS_SM)
                 .bg(theme::BG_PILL)
+                .when(is_selected, |d| d.border_1().border_color(theme::ACCENT))
                 .child(
                     div()
                         .id(("name", id as usize))
                         .w(px(140.0))
                         .cursor_pointer()
                         .child(name_label)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, _| this.audition(id))),
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.audition(id);
+                            this.select_channel(id, cx);
+                        })),
                 )
                 .child(
                     div()
