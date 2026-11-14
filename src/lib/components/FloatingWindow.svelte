@@ -166,6 +166,10 @@
     box-shadow: 0 16px 48px rgba(8,10,20,0.4);
     /* z-index is set dynamically via inline style from windowFocusStore */
     overflow: hidden;
+    /* Promotes each window to its own GPU compositing layer so a per-frame
+       repaint inside one (playhead, step highlight) doesn't force WebKitGTK
+       to repaint every other overlapping floating window too. */
+    will-change: transform;
   }
 
   .fw--maximized {
