@@ -1,0 +1,10 @@
+<!-- Small-size variant (favicon, titlebar, <~48px): the waveform, swoosh
+     and crescent detail in mark.svg disappear below that size anyway, so
+     this drops to the bare A silhouette plus one small dot standing in
+     for the moon — confirmed legible down to 32px. Uses currentColor;
+     set `color` on the <svg> or an ancestor to recolor for light grounds. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+  <polygon points="197,56 62,348 146,348 190,118" fill="currentColor" opacity="0.82"/>
+  <polygon points="203,56 338,348 254,348 210,118" fill="currentColor"/>
+  <circle cx="305" cy="100" r="24" fill="currentColor"/>
+</svg>

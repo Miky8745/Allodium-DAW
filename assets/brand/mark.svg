@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+  <!-- A monogram: two tapered brushstroke legs, lit from the right -->
+  <polygon points="197,56 62,348 146,348 190,118" fill="#4a9bd4"/>
+  <polygon points="203,56 338,348 254,348 210,118" fill="#7fc8ff"/>
+
+  <!-- waveform nested in the A's negative space -->
+  <rect x="150" y="315" width="12" height="25" rx="6" fill="#e9edf4"/>
+  <rect x="172" y="280" width="12" height="60" rx="6" fill="#e9edf4"/>
+  <rect x="194" y="250" width="12" height="90" rx="6" fill="#e9edf4"/>
+  <rect x="216" y="280" width="12" height="60" rx="6" fill="#e9edf4"/>
+  <rect x="238" y="315" width="12" height="25" rx="6" fill="#e9edf4"/>
+
+  <!-- orbit swoosh, ending at a waxing-crescent moon -->
+  <path d="M 95 265 C 130 95 225 25 305 100" fill="none" stroke="#e9edf4" stroke-width="7" stroke-linecap="round" opacity="0.95"/>
+  <circle cx="305" cy="100" r="24" fill="#e9edf4"/>
+  <circle cx="321" cy="94" r="24" fill="#0d0f15"/>
+</svg>
