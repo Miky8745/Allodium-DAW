@@ -4,12 +4,14 @@
 //! instead of a synthetic seeded `Vec<Note>`. See
 //! `docs/stage-05-piano-roll.md`.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::{
     Context, Entity, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Point, Render, ScrollWheelEvent, Styled, Window, canvas, div, point, prelude::*,
-    px, quad, rgb, size,
+    ParentElement, Pixels, Point, Render, ScrollWheelEvent, Styled, Window, canvas, div, point,
+    prelude::*, px, quad, rgb, size,
 };
 
 use crate::channel_rack::ChannelRack;
@@ -77,6 +79,15 @@ pub struct PianoRoll {
     scroll_y: f32,
     drag: DragMode,
     dying: Vec<DyingNote>,
+    /// The grid canvas's own on-screen origin, captured from its `canvas`
+    /// paint closure each frame. Plain `div()`s don't hand their own
+    /// screen bounds to mouse-event handlers (only `canvas`'s prepaint/
+    /// paint closures get a `bounds` param — see `docs/gpui-api-notes.md`),
+    /// and unlike the prototype this grid no longer fills the whole
+    /// window (it sits below the toolbar/Channel Rack/its own header), so
+    /// `event.position` (window-content coordinates) needs this subtracted
+    /// before it maps onto grid-local pixels.
+    grid_origin: Rc<Cell<Point<Pixels>>>,
 }
 
 impl PianoRoll {
@@ -90,6 +101,7 @@ impl PianoRoll {
             scroll_y: (PITCH_COUNT as f32 * KEY_H) / 2.0 - 200.0,
             drag: DragMode::None,
             dying: Vec::new(),
+            grid_origin: Rc::new(Cell::new(point(px(0.0), px(0.0)))),
         }
     }
 
@@ -130,12 +142,15 @@ impl PianoRoll {
             .position(|n| n.pitch == pitch && step >= n.start && step < n.start + n.length)
     }
 
-    /// `position` is in window-content coordinates; since the grid div fills
-    /// its container with no offset, that maps directly onto grid pixels
-    /// once the scroll offset is added back in.
+    /// `position` is in window-content coordinates; the grid canvas is
+    /// offset from the window origin (toolbar rows, Channel Rack panel,
+    /// this view's own header), so its on-screen origin (captured from the
+    /// canvas's paint closure into `grid_origin`) has to be subtracted
+    /// before the scroll offset maps it onto grid-local pixels.
     fn pointer_to_grid(&self, position: Point<gpui::Pixels>) -> (f64, i32) {
-        let x = f32::from(position.x) + self.scroll_x;
-        let y = f32::from(position.y) + self.scroll_y;
+        let origin = self.grid_origin.get();
+        let x = f32::from(position.x - origin.x) + self.scroll_x;
+        let y = f32::from(position.y - origin.y) + self.scroll_y;
         (x_to_step(x), y_to_pitch(y))
     }
 
@@ -248,6 +263,7 @@ impl Render for PianoRoll {
             .collect();
         let scroll_x = self.scroll_x;
         let scroll_y = self.scroll_y;
+        let grid_origin = self.grid_origin.clone();
 
         div()
             .size_full()
@@ -292,6 +308,7 @@ impl Render for PianoRoll {
                                 canvas(
                                     move |_, _, _| {},
                                     move |bounds, _, window, _| {
+                                        grid_origin.set(bounds.origin);
                                         paint_grid(window, bounds, scroll_x, scroll_y, &notes, &dying, current_step);
                                     },
                                 )
