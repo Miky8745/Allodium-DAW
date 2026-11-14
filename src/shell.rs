@@ -3,19 +3,26 @@
 //! "Views" section). Empty chrome only for Stage 1 — each zone's real
 //! content arrives with its own later stage.
 
-use gpui::{Context, IntoElement, ParentElement, Render, Styled, Window, div};
+use std::sync::Arc;
 
+use gpui::{AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div};
+
+use crate::audio::AudioEngine;
+use crate::channel_rack::ChannelRack;
 use crate::perf::FrameStats;
 use crate::theme;
 
 pub struct AppShell {
     frame_stats: FrameStats,
+    channel_rack: Entity<ChannelRack>,
 }
 
 impl AppShell {
-    pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+    pub fn new(engine: Arc<AudioEngine>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let channel_rack = cx.new(|cx| ChannelRack::new(engine, window, cx));
         Self {
             frame_stats: FrameStats::new(),
+            channel_rack,
         }
     }
 }
@@ -65,7 +72,7 @@ impl Render for AppShell {
                             .border_r_1()
                             .border_color(theme::BORDER),
                     )
-                    .child(div().flex_1().h_full().bg(theme::BG_APP)),
+                    .child(div().flex_1().h_full().bg(theme::BG_APP).child(self.channel_rack.clone())),
             )
     }
 }

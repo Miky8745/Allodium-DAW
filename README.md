@@ -41,15 +41,3 @@ as a later optimization pass.
 ```sh
 nix-shell --run "cargo run"
 ```
-
-### Roadmap
-
-| Stage | |
-|---|:---:|
-| Shell | ✅ |
-| Project format | ⬜ |
-| Audio engine | ⬜ |
-| Channel Rack | ⬜ |
-| Piano Roll | ⬜ |
-| Playlist | ⬜ |
-| Mixer | ⬜ |

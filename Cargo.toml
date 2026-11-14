@@ -9,6 +9,7 @@ cpal = "0.15"
 serde = { version = "1", features = ["derive"] }
 quick-xml = { version = "0.41.0", features = ["serialize"] }
 symphonia = { version = "0.5", features = ["wav", "ogg", "vorbis", "mp3", "pcm", "flac"] }
+rfd = "0.15"
 
 [profile.dev]
 opt-level = 1
