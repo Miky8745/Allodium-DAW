@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::audio::{self, AudioEngine, SampleBuffer};
-use crate::project::{self, Channel, PatternContentEntry, ProjectFile};
+use crate::project::{self, Channel, Pattern, PatternContentEntry, Placement, ProjectFile};
 use crate::theme;
 
 const STEP_COUNT: usize = 16;
@@ -37,6 +37,8 @@ pub struct ChannelRack {
     project: ProjectFile,
     samples: HashMap<String, Arc<SampleBuffer>>,
     next_channel_id: u32,
+    next_pattern_id: u32,
+    next_placement_id: u32,
     drag: Option<SliderDrag>,
     selected_channel_id: Option<u32>,
 }
@@ -59,6 +61,8 @@ impl ChannelRack {
         }
 
         let next_channel_id = project.channels.items.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+        let next_pattern_id = project.patterns.items.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+        let next_placement_id = project.placements.items.iter().map(|p| p.id).max().unwrap_or(0) + 1;
         let selected_channel_id = project.channels.items.first().map(|c| c.id);
 
         let mut rack = Self {
@@ -66,6 +70,8 @@ impl ChannelRack {
             project,
             samples,
             next_channel_id,
+            next_pattern_id,
+            next_placement_id,
             drag: None,
             selected_channel_id,
         };
@@ -133,11 +139,85 @@ impl ChannelRack {
         self.save();
     }
 
+    pub fn patterns(&self) -> &[Pattern] {
+        &self.project.patterns.items
+    }
+
+    pub fn selected_pattern_id(&self) -> u32 {
+        self.project.selected_pattern_id
+    }
+
+    /// Switches which pattern is being edited/drawn (Channel Rack, Piano
+    /// Roll) *and* which pattern the Playlist draws when you click empty
+    /// lane space — one "active pattern" concept shared by all three,
+    /// mirroring the original's single `patternStore.selectedPatternId`.
+    pub fn select_pattern(&mut self, pattern_id: u32, cx: &mut Context<Self>) {
+        self.project.selected_pattern_id = pattern_id;
+        self.push_snapshot();
+        self.save();
+        cx.notify();
+    }
+
+    pub fn add_pattern(&mut self, cx: &mut Context<Self>) {
+        let id = self.next_pattern_id;
+        self.next_pattern_id += 1;
+        self.project.patterns.items.push(Pattern { id, name: format!("Pattern {id}"), length_beats: 4.0 });
+        self.project.selected_pattern_id = id;
+        self.push_snapshot();
+        self.save();
+        cx.notify();
+    }
+
+    pub fn beats_per_bar(&self) -> u32 {
+        self.project.beats_per_bar
+    }
+
+    pub fn placements(&self) -> &[Placement] {
+        &self.project.placements.items
+    }
+
+    /// Replaces the whole Playlist arrangement at once, like `update_notes`
+    /// does for a channel's notes — the Playlist view owns its own local
+    /// editing buffer and this is just the write-through.
+    pub fn update_placements(&mut self, placements: Vec<Placement>, cx: &mut Context<Self>) {
+        self.project.placements.items = placements;
+        self.push_snapshot();
+        cx.notify();
+    }
+
+    pub fn next_placement_id(&mut self) -> u32 {
+        let id = self.next_placement_id;
+        self.next_placement_id += 1;
+        id
+    }
+
+    pub fn is_song_mode(&self) -> bool {
+        self.engine.is_song_mode()
+    }
+
+    pub fn song_step(&self) -> f64 {
+        self.engine.song_step()
+    }
+
+    /// Toggling Pattern/Song restarts playback in the new mode immediately
+    /// if the transport is already running — mirrors the original's
+    /// documented behavior rather than waiting for the next manual Play.
+    pub fn toggle_song_mode(&mut self, cx: &mut Context<Self>) {
+        let now_song = !self.engine.is_song_mode();
+        self.engine.set_song_mode(now_song);
+        if self.engine.is_playing() {
+            self.engine.stop();
+            self.engine.play(self.project.tempo);
+        }
+        cx.notify();
+    }
+
     fn push_snapshot(&mut self) {
         match audio::build_snapshot(&self.project, &self.samples) {
             Ok(snapshot) => self.engine.set_content(snapshot),
             Err(e) => eprintln!("[channel rack] couldn't build snapshot: {e}"),
         }
+        self.engine.set_song_content(audio::build_song_snapshot(&self.project, &self.samples));
     }
 
     fn save(&self) {
@@ -334,6 +414,7 @@ impl Render for ChannelRack {
         cx.notify();
 
         let playing = self.engine.is_playing();
+        let song_mode = self.engine.is_song_mode();
         let current_step = if playing { self.engine.current_step().floor() as i64 } else { -1 };
         let channel_ids: Vec<u32> = self.project.channels.items.iter().map(|c| c.id).collect();
         let pattern_id = self.project.selected_pattern_id;
@@ -459,6 +540,21 @@ impl Render for ChannelRack {
                     .cursor_pointer()
                     .child(if playing { "Stop" } else { "Play" })
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_play(cx))),
+            )
+            .child(
+                div()
+                    .id("transport-mode")
+                    .w(px(52.0))
+                    .h(px(24.0))
+                    .rounded(theme::RADIUS_SM)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.0))
+                    .bg(if song_mode { theme::ACCENT } else { theme::BG_PILL })
+                    .cursor_pointer()
+                    .child(if song_mode { "Song" } else { "Pat" })
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_song_mode(cx))),
             )
             .child(
                 div()

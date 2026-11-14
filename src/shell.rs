@@ -11,22 +11,26 @@ use crate::audio::AudioEngine;
 use crate::channel_rack::ChannelRack;
 use crate::perf::FrameStats;
 use crate::piano_roll::PianoRoll;
+use crate::playlist::Playlist;
 use crate::theme;
 
 pub struct AppShell {
     frame_stats: FrameStats,
     channel_rack: Entity<ChannelRack>,
     piano_roll: Entity<PianoRoll>,
+    playlist: Entity<Playlist>,
 }
 
 impl AppShell {
     pub fn new(engine: Arc<AudioEngine>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let channel_rack = cx.new(|cx| ChannelRack::new(engine, window, cx));
         let piano_roll = cx.new(|cx| PianoRoll::new(channel_rack.clone(), window, cx));
+        let playlist = cx.new(|cx| Playlist::new(channel_rack.clone(), window, cx));
         Self {
             frame_stats: FrameStats::new(),
             channel_rack,
             piano_roll,
+            playlist,
         }
     }
 }
@@ -92,7 +96,15 @@ impl Render for AppShell {
                                     .border_color(theme::BORDER)
                                     .child(self.channel_rack.clone()),
                             )
-                            .child(div().flex_1().w_full().child(self.piano_roll.clone())),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .w_full()
+                                    .border_b_1()
+                                    .border_color(theme::BORDER)
+                                    .child(self.piano_roll.clone()),
+                            )
+                            .child(div().flex_1().w_full().child(self.playlist.clone())),
                     ),
             )
     }
