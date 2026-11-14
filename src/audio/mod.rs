@@ -71,6 +71,7 @@ pub fn build_song_snapshot(project: &ProjectFile, samples: &HashMap<String, Arc<
                     volume: ch.volume as f32,
                     pan: ch.pan as f32,
                     muted: ch.muted || (any_soloed && !ch.soloed),
+                    bus: ch.mixer_track,
                 })
             })
             .collect();
@@ -100,11 +101,51 @@ pub struct ChannelVoiceData {
     /// from the original's same-named rule ("explicit mute always wins
     /// regardless of solo").
     pub muted: bool,
+    /// Which mixer bus this channel's voices render into — `0` means
+    /// straight to Master (the default, per `stages/07-mixer.md`:
+    /// "every channel routes to Master until explicitly assigned
+    /// elsewhere"), otherwise a `MixerTrack` id.
+    pub bus: u32,
 }
 
 pub struct PlaybackSnapshot {
     pub channels: Vec<ChannelVoiceData>,
     pub pattern_length_steps: u32,
+}
+
+/// One mixer-bus strip's audio-thread-ready data (Master itself is
+/// handled separately — it has no mute/solo per `docs/mixer.md`'s
+/// documented "Master is never mutable/soloable" rule, just the
+/// `master_volume` carried alongside this list).
+pub struct MixerBusVoiceData {
+    pub id: u32,
+    pub volume: f32,
+    pub pan: f32,
+    /// Already folded in: explicit mute, or (any bus soloed and this one
+    /// isn't) — same "mute always wins" rule as channels, but *multi*-solo
+    /// here (unlike the Channel Rack's single-solo), per the original's
+    /// documented "standard multi-solo mixer semantics."
+    pub muted: bool,
+}
+
+/// Builds the mixer-bus list + Master volume from the project — called
+/// alongside `build_snapshot`/`build_song_snapshot` on every edit, since
+/// routing/volume/pan/mute/solo on a bus affects both pattern and song
+/// mode identically and isn't pattern-scoped content.
+pub fn build_mixer_buses(project: &ProjectFile) -> (Vec<MixerBusVoiceData>, f32) {
+    let any_soloed = project.mixer_tracks.items.iter().any(|t| t.soloed);
+    let buses = project
+        .mixer_tracks
+        .items
+        .iter()
+        .map(|t| MixerBusVoiceData {
+            id: t.id,
+            volume: t.volume as f32,
+            pan: t.pan as f32,
+            muted: t.muted || (any_soloed && !t.soloed),
+        })
+        .collect();
+    (buses, project.master_volume as f32)
 }
 
 /// Builds a `PlaybackSnapshot` for the project's currently selected
@@ -143,6 +184,7 @@ pub fn build_snapshot(
                 volume: ch.volume as f32,
                 pan: ch.pan as f32,
                 muted: ch.muted || (any_soloed && !ch.soloed),
+                bus: ch.mixer_track,
             })
         })
         .collect();
@@ -163,12 +205,25 @@ struct Voice {
     pan: f32,
     envelope: Envelope,
     frames_played: u64,
+    /// `0` = Master. Resolved to an accumulator slot each sample via
+    /// `bus_index` rather than stored as an index, so a bus that's
+    /// removed mid-note just falls back to Master instead of panicking
+    /// on a stale index.
+    bus: u32,
 }
 
 impl Voice {
-    fn new(sample: Arc<SampleBuffer>, pitch_rate: f64, volume: f32, pan: f32, envelope: Envelope, out_sample_rate: u32) -> Self {
+    fn new(
+        sample: Arc<SampleBuffer>,
+        pitch_rate: f64,
+        volume: f32,
+        pan: f32,
+        envelope: Envelope,
+        out_sample_rate: u32,
+        bus: u32,
+    ) -> Self {
         let rate_correction = sample.sample_rate as f64 / out_sample_rate as f64;
-        Voice { sample, pos: 0.0, playback_rate: pitch_rate * rate_correction, volume, pan, envelope, frames_played: 0 }
+        Voice { sample, pos: 0.0, playback_rate: pitch_rate * rate_correction, volume, pan, envelope, frames_played: 0, bus }
     }
 
     /// Renders one output frame into `mix_l`/`mix_r`, advances position,
@@ -222,7 +277,15 @@ fn trigger_channel_step(ch: &ChannelVoiceData, step: i64, bpm: f64, out_sample_r
     }
     if ch.notes.is_empty() {
         if ch.steps.get(step as usize).copied().unwrap_or(false) {
-            voices.push(Voice::new(ch.sample.clone(), 1.0, ch.volume, ch.pan, Envelope::ring(out_sample_rate), out_sample_rate));
+            voices.push(Voice::new(
+                ch.sample.clone(),
+                1.0,
+                ch.volume,
+                ch.pan,
+                Envelope::ring(out_sample_rate),
+                out_sample_rate,
+                ch.bus,
+            ));
         }
     } else {
         for note in &ch.notes {
@@ -237,10 +300,22 @@ fn trigger_channel_step(ch: &ChannelVoiceData, step: i64, bpm: f64, out_sample_r
                     ch.pan,
                     Envelope::shaped(duration_frames, out_sample_rate),
                     out_sample_rate,
+                    ch.bus,
                 ));
             }
         }
     }
+}
+
+/// Resolves a channel/voice's `bus` id to a slot in the per-frame
+/// accumulator: an unknown or `0` id falls back to `master_idx` (the
+/// default "straight to Master" behavior, and a safety net if a bus was
+/// removed while a voice targeting it was still ringing out).
+fn bus_index(buses: &[MixerBusVoiceData], bus_id: u32, master_idx: usize) -> usize {
+    if bus_id == 0 {
+        return master_idx;
+    }
+    buses.iter().position(|b| b.id == bus_id).unwrap_or(master_idx)
 }
 
 struct PlaybackState {
@@ -272,6 +347,10 @@ enum EngineMessage {
     /// edit alongside `UpdateContent` (patterns, placements, channel
     /// content can all affect it), same reasoning as that variant.
     UpdateSongContent { placements: Vec<SongPlacementVoiceData>, song_length_steps: u32 },
+    /// Replaces the mixer-bus list + Master volume. Applies to both
+    /// pattern and song mode identically, so it's pushed independently of
+    /// either rather than duplicated into both snapshot kinds.
+    UpdateMixer { buses: Vec<MixerBusVoiceData>, master_volume: f32 },
 }
 
 /// Owns a *persistent* `cpal` output stream (built once, alive for the
@@ -314,6 +393,14 @@ impl AudioEngine {
         let mut song_length_steps: i64 = 16;
         let mut voices: Vec<Voice> = Vec::new();
         let mut last_triggered_step: i64 = -1;
+        let mut buses: Vec<MixerBusVoiceData> = Vec::new();
+        let mut master_volume: f32 = 1.0;
+        // Per-bus accumulators for one output sample-frame; index
+        // `buses.len()` is reserved for Master. Resized only when `buses`
+        // changes (on an `UpdateMixer` message), zeroed every frame —
+        // no per-sample allocation.
+        let mut bus_l: Vec<f32> = vec![0.0];
+        let mut bus_r: Vec<f32> = vec![0.0];
 
         let stream = device
             .build_output_stream(
@@ -326,11 +413,17 @@ impl AudioEngine {
                                 pattern_length_steps = new_len.max(1) as i64;
                             }
                             EngineMessage::Preview { sample, volume, pan } => {
-                                voices.push(Voice::new(sample, 1.0, volume, pan, Envelope::ring(out_sample_rate), out_sample_rate));
+                                voices.push(Voice::new(sample, 1.0, volume, pan, Envelope::ring(out_sample_rate), out_sample_rate, 0));
                             }
                             EngineMessage::UpdateSongContent { placements, song_length_steps: new_len } => {
                                 song_placements = placements;
                                 song_length_steps = new_len.max(1) as i64;
+                            }
+                            EngineMessage::UpdateMixer { buses: new_buses, master_volume: new_master } => {
+                                buses = new_buses;
+                                master_volume = new_master;
+                                bus_l = vec![0.0; buses.len() + 1];
+                                bus_r = vec![0.0; buses.len() + 1];
                             }
                         }
                     }
@@ -376,13 +469,51 @@ impl AudioEngine {
                         // Voices (scheduled or previewed) keep rendering
                         // regardless of transport state, so a preview
                         // click plays out even while stopped.
-                        let mut mix_l = 0.0f32;
-                        let mut mix_r = 0.0f32;
-                        voices.retain_mut(|v| v.render(&mut mix_l, &mut mix_r));
+                        let master_idx = buses.len();
+                        for x in bus_l.iter_mut() {
+                            *x = 0.0;
+                        }
+                        for x in bus_r.iter_mut() {
+                            *x = 0.0;
+                        }
+                        voices.retain_mut(|v| {
+                            let mut l = 0.0f32;
+                            let mut r = 0.0f32;
+                            let alive = v.render(&mut l, &mut r);
+                            let idx = bus_index(&buses, v.bus, master_idx);
+                            bus_l[idx] += l;
+                            bus_r[idx] += r;
+                            alive
+                        });
+
+                        // Mix every non-Master bus's own volume/pan/mute
+                        // down into Master — a channel routed straight to
+                        // Master (`bus == 0`, the default) already landed
+                        // in `master_idx` above and skips this entirely,
+                        // so only an explicitly-routed channel's sound is
+                        // affected by its bus's controls, independent of
+                        // the channel's own volume/pan/mute.
+                        for (i, bus) in buses.iter().enumerate() {
+                            if bus.muted {
+                                continue;
+                            }
+                            let bl = bus_l[i] * bus.volume;
+                            let br = bus_r[i] * bus.volume;
+                            // A balance control, not the channel-level
+                            // equal-power pan above — the source here is
+                            // already a stereo sub-mix, not a mono
+                            // sample being positioned in the field.
+                            let pan = bus.pan.clamp(0.0, 1.0);
+                            let left_gain = 1.0 - (pan - 0.5).max(0.0) * 2.0;
+                            let right_gain = 1.0 - (0.5 - pan).max(0.0) * 2.0;
+                            bus_l[master_idx] += bl * left_gain;
+                            bus_r[master_idx] += br * right_gain;
+                        }
+
                         // Soft clip rather than a hard clamp, so a loud
                         // mix compresses gracefully instead of crackling.
-                        mix_l = mix_l.tanh();
-                        mix_r = mix_r.tanh();
+                        let mix_l = (bus_l[master_idx] * master_volume).tanh();
+                        let mix_r = (bus_r[master_idx] * master_volume).tanh();
 
                         match frame.len() {
                             1 => frame[0] = (mix_l + mix_r) * 0.5,
@@ -464,6 +595,13 @@ impl AudioEngine {
         });
     }
 
+    /// Pushes a fresh mixer-bus list + Master volume — call on every edit
+    /// that could affect it (a bus's own volume/pan/mute/solo, adding/
+    /// removing a bus, or a channel's routing).
+    pub fn set_mixer(&self, buses: Vec<MixerBusVoiceData>, master_volume: f32) {
+        let _ = self.sender.send(EngineMessage::UpdateMixer { buses, master_volume });
+    }
+
     /// Selects which mode `play()` starts in. Independent of `playing` —
     /// can be toggled whether the transport is running or stopped; if it's
     /// running, the caller is responsible for restarting it (stop + play)
@@ -527,5 +665,44 @@ mod song_snapshot_tests {
 
         let snapshot = build_song_snapshot(&project, &HashMap::new());
         assert_eq!(snapshot.song_length_steps, 32);
+    }
+}
+
+#[cfg(test)]
+mod mixer_bus_tests {
+    use super::*;
+    use crate::project::{MixerTrack, ProjectFile};
+
+    fn track(id: u32, muted: bool, soloed: bool) -> MixerTrack {
+        MixerTrack { id, volume: 0.8, pan: 0.5, muted, soloed, routes_to: 0 }
+    }
+
+    #[test]
+    fn an_explicit_mute_wins_even_if_nothing_else_is_soloed() {
+        let mut project = ProjectFile::default();
+        project.mixer_tracks.items.push(track(1, true, false));
+        let (buses, _) = build_mixer_buses(&project);
+        assert!(buses[0].muted);
+    }
+
+    #[test]
+    fn soloing_one_track_silences_the_others_even_if_unmuted() {
+        let mut project = ProjectFile::default();
+        project.mixer_tracks.items.push(track(1, false, false));
+        project.mixer_tracks.items.push(track(2, false, true));
+        let (buses, _) = build_mixer_buses(&project);
+        assert!(buses[0].muted, "track 1 isn't soloed and another track is, so it should be silenced");
+        assert!(!buses[1].muted, "the soloed track itself must stay audible");
+    }
+
+    #[test]
+    fn an_unknown_or_zero_bus_id_falls_back_to_master() {
+        let mut project = ProjectFile::default();
+        project.mixer_tracks.items.push(track(1, false, false));
+        let (buses, _) = build_mixer_buses(&project);
+        let master_idx = buses.len();
+        assert_eq!(bus_index(&buses, 0, master_idx), master_idx);
+        assert_eq!(bus_index(&buses, 99, master_idx), master_idx, "a removed/unknown bus id must not panic or alias another bus");
+        assert_eq!(bus_index(&buses, 1, master_idx), 0);
     }
 }

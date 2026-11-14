@@ -9,6 +9,7 @@ use gpui::{AppContext, Context, Entity, IntoElement, ParentElement, Render, Styl
 
 use crate::audio::AudioEngine;
 use crate::channel_rack::ChannelRack;
+use crate::mixer::Mixer;
 use crate::perf::FrameStats;
 use crate::piano_roll::PianoRoll;
 use crate::playlist::Playlist;
@@ -19,6 +20,7 @@ pub struct AppShell {
     channel_rack: Entity<ChannelRack>,
     piano_roll: Entity<PianoRoll>,
     playlist: Entity<Playlist>,
+    mixer: Entity<Mixer>,
 }
 
 impl AppShell {
@@ -26,11 +28,13 @@ impl AppShell {
         let channel_rack = cx.new(|cx| ChannelRack::new(engine, window, cx));
         let piano_roll = cx.new(|cx| PianoRoll::new(channel_rack.clone(), window, cx));
         let playlist = cx.new(|cx| Playlist::new(channel_rack.clone(), window, cx));
+        let mixer = cx.new(|cx| Mixer::new(channel_rack.clone(), window, cx));
         Self {
             frame_stats: FrameStats::new(),
             channel_rack,
             piano_roll,
             playlist,
+            mixer,
         }
     }
 }
@@ -104,7 +108,15 @@ impl Render for AppShell {
                                     .border_color(theme::BORDER)
                                     .child(self.piano_roll.clone()),
                             )
-                            .child(div().flex_1().w_full().child(self.playlist.clone())),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .w_full()
+                                    .border_b_1()
+                                    .border_color(theme::BORDER)
+                                    .child(self.playlist.clone()),
+                            )
+                            .child(div().h(theme::MIXER_H).w_full().child(self.mixer.clone())),
                     ),
             )
     }

@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::audio::{self, AudioEngine, SampleBuffer};
-use crate::project::{self, Channel, Pattern, PatternContentEntry, Placement, ProjectFile};
+use crate::project::{self, Channel, MixerTrack, Pattern, PatternContentEntry, Placement, ProjectFile};
 use crate::theme;
 
 const STEP_COUNT: usize = 16;
@@ -39,6 +39,7 @@ pub struct ChannelRack {
     next_channel_id: u32,
     next_pattern_id: u32,
     next_placement_id: u32,
+    next_mixer_track_id: u32,
     drag: Option<SliderDrag>,
     selected_channel_id: Option<u32>,
 }
@@ -63,6 +64,7 @@ impl ChannelRack {
         let next_channel_id = project.channels.items.iter().map(|c| c.id).max().unwrap_or(0) + 1;
         let next_pattern_id = project.patterns.items.iter().map(|p| p.id).max().unwrap_or(0) + 1;
         let next_placement_id = project.placements.items.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+        let next_mixer_track_id = project.mixer_tracks.items.iter().map(|t| t.id).max().unwrap_or(0) + 1;
         let selected_channel_id = project.channels.items.first().map(|c| c.id);
 
         let mut rack = Self {
@@ -72,6 +74,7 @@ impl ChannelRack {
             next_channel_id,
             next_pattern_id,
             next_placement_id,
+            next_mixer_track_id,
             drag: None,
             selected_channel_id,
         };
@@ -212,12 +215,110 @@ impl ChannelRack {
         cx.notify();
     }
 
+    pub fn mixer_tracks(&self) -> &[MixerTrack] {
+        &self.project.mixer_tracks.items
+    }
+
+    pub fn master_volume(&self) -> f64 {
+        self.project.master_volume
+    }
+
+    /// Live update during a fader drag — rebuilds the mixer-bus snapshot
+    /// so the change is audible immediately, but doesn't save; call
+    /// `persist` at drag-end, same split as every other slider in this
+    /// app.
+    pub fn set_master_volume(&mut self, volume: f64, cx: &mut Context<Self>) {
+        self.project.master_volume = volume.clamp(0.0, 1.0);
+        self.push_snapshot();
+        cx.notify();
+    }
+
+    pub fn add_mixer_track(&mut self, cx: &mut Context<Self>) {
+        let id = self.next_mixer_track_id;
+        self.next_mixer_track_id += 1;
+        self.project.mixer_tracks.items.push(MixerTrack { id, volume: 0.8, pan: 0.5, muted: false, soloed: false, routes_to: 0 });
+        self.push_snapshot();
+        self.save();
+        cx.notify();
+    }
+
+    /// Any channel routed to the removed track falls back to Master,
+    /// mirroring the original's "nothing goes silently unrouted" rule for
+    /// a removed routing target.
+    pub fn remove_mixer_track(&mut self, track_id: u32, cx: &mut Context<Self>) {
+        self.project.mixer_tracks.items.retain(|t| t.id != track_id);
+        for ch in &mut self.project.channels.items {
+            if ch.mixer_track == track_id {
+                ch.mixer_track = 0;
+            }
+        }
+        self.push_snapshot();
+        self.save();
+        cx.notify();
+    }
+
+    pub fn set_mixer_track_volume(&mut self, track_id: u32, volume: f64, cx: &mut Context<Self>) {
+        if let Some(t) = self.project.mixer_tracks.items.iter_mut().find(|t| t.id == track_id) {
+            t.volume = volume.clamp(0.0, 1.0);
+        }
+        self.push_snapshot();
+        cx.notify();
+    }
+
+    pub fn set_mixer_track_pan(&mut self, track_id: u32, pan: f64, cx: &mut Context<Self>) {
+        if let Some(t) = self.project.mixer_tracks.items.iter_mut().find(|t| t.id == track_id) {
+            t.pan = pan.clamp(0.0, 1.0);
+        }
+        self.push_snapshot();
+        cx.notify();
+    }
+
+    pub fn toggle_mixer_mute(&mut self, track_id: u32, cx: &mut Context<Self>) {
+        if let Some(t) = self.project.mixer_tracks.items.iter_mut().find(|t| t.id == track_id) {
+            t.muted = !t.muted;
+        }
+        self.push_snapshot();
+        self.save();
+        cx.notify();
+    }
+
+    /// Multi-solo (unlike the Channel Rack's own single-solo) — per
+    /// `docs/mixer.md`'s documented "standard multi-solo mixer semantics",
+    /// a deliberately different rule from the Channel Rack's solo despite
+    /// looking like the same button.
+    pub fn toggle_mixer_solo(&mut self, track_id: u32, cx: &mut Context<Self>) {
+        if let Some(t) = self.project.mixer_tracks.items.iter_mut().find(|t| t.id == track_id) {
+            t.soloed = !t.soloed;
+        }
+        self.push_snapshot();
+        self.save();
+        cx.notify();
+    }
+
+    /// Cycles a channel's mixer routing through Master → track 1 → track
+    /// 2 → … → back to Master. The whole "pick a routing target" UI for
+    /// the MVP, per `stages/07-mixer.md`'s single-target-only scope — no
+    /// dropdown/menu needed for a handful of targets.
+    pub fn cycle_channel_route(&mut self, channel_id: u32, cx: &mut Context<Self>) {
+        let mut targets: Vec<u32> = vec![0];
+        targets.extend(self.project.mixer_tracks.items.iter().map(|t| t.id));
+        if let Some(ch) = self.project.channels.items.iter_mut().find(|c| c.id == channel_id) {
+            let pos = targets.iter().position(|t| *t == ch.mixer_track).unwrap_or(0);
+            ch.mixer_track = targets[(pos + 1) % targets.len()];
+        }
+        self.push_snapshot();
+        self.save();
+        cx.notify();
+    }
+
     fn push_snapshot(&mut self) {
         match audio::build_snapshot(&self.project, &self.samples) {
             Ok(snapshot) => self.engine.set_content(snapshot),
             Err(e) => eprintln!("[channel rack] couldn't build snapshot: {e}"),
         }
         self.engine.set_song_content(audio::build_song_snapshot(&self.project, &self.samples));
+        let (buses, master_volume) = audio::build_mixer_buses(&self.project);
+        self.engine.set_mixer(buses, master_volume);
     }
 
     fn save(&self) {
@@ -501,6 +602,22 @@ impl Render for ChannelRack {
                         .cursor_pointer()
                         .child("S")
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_solo(id, cx))),
+                )
+                .child(
+                    div()
+                        .id(("route", id as usize))
+                        .w(px(44.0))
+                        .h(px(20.0))
+                        .rounded(px(4.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(9.0))
+                        .bg(theme::BG_PANEL)
+                        .text_color(theme::ACCENT_DIM)
+                        .cursor_pointer()
+                        .child(if ch.mixer_track == 0 { "Mstr".to_string() } else { format!("Trk {}", ch.mixer_track) })
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.cycle_channel_route(id, cx))),
                 )
                 .child(slider("VOL", ch.volume, id, SliderKind::Volume, cx))
                 .child(slider("PAN", ch.pan, id, SliderKind::Pan, cx))

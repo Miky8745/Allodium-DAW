@@ -131,6 +131,10 @@ fn default_step_count() -> u32 {
     16
 }
 
+fn default_master_volume() -> f64 {
+    1.0
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectFile {
@@ -149,6 +153,12 @@ pub struct ProjectFile {
     pub placements: PlacementsXml,
     #[serde(default)]
     pub mixer_tracks: MixerTracksXml,
+    /// Master strip's own volume fader. Per `docs/mixer.md`'s documented
+    /// behavior, Master has no pan/mute/solo of its own (never mutable or
+    /// soloable), so this is its only control — no separate `MasterTrack`
+    /// struct needed for one field.
+    #[serde(default = "default_master_volume")]
+    pub master_volume: f64,
 }
 
 impl Default for ProjectFile {
@@ -165,6 +175,7 @@ impl Default for ProjectFile {
             },
             placements: PlacementsXml::default(),
             mixer_tracks: MixerTracksXml::default(),
+            master_volume: default_master_volume(),
         }
     }
 }
@@ -255,5 +266,6 @@ mod tests {
         let p: ProjectFile = quick_xml::de::from_str(old).unwrap();
         assert_eq!(p.step_count, 16);
         assert!(p.mixer_tracks.items.is_empty());
+        assert_eq!(p.master_volume, 1.0);
     }
 }
