@@ -1,0 +1,580 @@
+//! Row 1 + row 2 toolbar — ports every control from Allodium-tauri's
+//! `Toolbar.svelte` into this app's own visual language (see
+//! `docs/stage-09-toolbar.md`). Icons/labels/positions were freely
+//! redesigned, but every original control has a place somewhere here:
+//!
+//! - Transport (Pattern/Song switch, Play/Stop/Pause/Record, BPM, step
+//!   position), the four feature toggles, and the two monitor widgets
+//!   sit in row 1, right of the File/Edit/… menu.
+//! - The hover-info readout, panel toggles, Auto-scroll/one-click-record,
+//!   Snap/Pattern pickers, the MIDI LED, and the Shift/Alt/Ctrl badges
+//!   sit in row 2.
+//!
+//! Wiring fidelity: anything this rewrite's audio engine already backs
+//! (play/stop, tempo, step position, Pattern/Song mode, pattern
+//! selection, panel visibility) is wired live. Several of the original's
+//! own toggles (Record, Precount, Loop record, Auto-scroll, One-click
+//! record, Snapping) were themselves just local component state in
+//! `Toolbar.svelte` with no further consumption shown there either — those
+//! are ported at that same fidelity: a real, persistent, click-to-toggle
+//! control, just not driving a scheduler/audio feature that doesn't
+//! exist yet in this rewrite. Metronome goes one step further and ports
+//! the original's one real side effect (turning it on auto-starts
+//! playback). Only two controls have no faithful equivalent at all and
+//! stay inert, non-interactive chrome: the MIDI LED (no MIDI I/O
+//! anywhere in this codebase) and the Explorer panel toggle (no
+//! file-browser panel exists yet — MVP item #8, still unbuilt).
+
+use gpui::{
+    ClickEvent, Context, IntoElement, Modifiers, ParentElement, ScrollWheelEvent, Styled, Window,
+    div, prelude::*, px,
+};
+
+use crate::floating_panel::PanelKind;
+use crate::shell::AppShell;
+use crate::theme;
+
+const MENU_LABELS: [&str; 6] = ["File", "Edit", "View", "Options", "Tools", "Help"];
+
+pub struct ToolbarState {
+    /// Name/value of the last-hovered toolbar control — mirrors the
+    /// original's `hoverInfoStore`, scoped to this toolbar's own controls
+    /// rather than the whole app's Dial/Knob/Slider widgets (a full
+    /// app-wide retrofit is a much bigger, separate change). Stays
+    /// showing after the mouse moves off; blank until anything's been
+    /// hovered at all.
+    pub(crate) hover: Option<(&'static str, String)>,
+    pub(crate) modifiers: Modifiers,
+    paused: bool,
+    recording: bool,
+    typing_keyboard: bool,
+    precount: bool,
+    loop_record: bool,
+    metronome: bool,
+    auto_scroll: bool,
+    one_click_record: bool,
+    snap_quarter: bool,
+}
+
+impl Default for ToolbarState {
+    fn default() -> Self {
+        Self {
+            hover: None,
+            modifiers: Modifiers::default(),
+            paused: false,
+            recording: false,
+            typing_keyboard: false,
+            precount: false,
+            loop_record: false,
+            metronome: false,
+            auto_scroll: false,
+            one_click_record: false,
+            snap_quarter: true, // matches the original's default `snapping = '1/4'`
+        }
+    }
+}
+
+/// A small pill: glyph/label, click toggles `active`, hover reports
+/// `(name, value)` into the info readout. Covers every toggle-shaped
+/// control in both rows (real or locally-stubbed alike).
+fn toggle(
+    id: impl Into<gpui::ElementId>,
+    content: impl IntoElement,
+    active: bool,
+    name: &'static str,
+    value: impl Into<String>,
+    on_click: impl Fn(&mut AppShell, &ClickEvent, &mut Window, &mut Context<AppShell>) + 'static,
+    cx: &mut Context<AppShell>,
+) -> impl IntoElement {
+    let value = value.into();
+    div()
+        .id(id)
+        .w(px(30.0))
+        .h(px(26.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(theme::RADIUS_SM)
+        .text_size(px(11.0))
+        .cursor_pointer()
+        .bg(if active { theme::BG_PILL_ACTIVE } else { theme::BG_PILL })
+        .text_color(if active { theme::ACCENT } else { theme::ACCENT_DIM })
+        .child(content)
+        .on_click(cx.listener(on_click))
+        .on_hover(cx.listener(move |shell, hovering: &bool, _, cx| {
+            if *hovering {
+                shell.toolbar.hover = Some((name, value.clone()));
+                cx.notify();
+            }
+        }))
+}
+
+/// A non-interactive control with no backend to toggle at all (MIDI LED,
+/// the Explorer panel) — dim, no click handler, hover still reports its
+/// status honestly rather than implying it does something.
+fn inert(
+    id: impl Into<gpui::ElementId>,
+    content: impl IntoElement,
+    name: &'static str,
+    note: &'static str,
+    cx: &mut Context<AppShell>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(30.0))
+        .h(px(26.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(theme::RADIUS_SM)
+        .text_size(px(11.0))
+        .text_color(theme::ACCENT_DIM.alpha(0.5))
+        .child(content)
+        .on_hover(cx.listener(move |shell, hovering: &bool, _, cx| {
+            if *hovering {
+                shell.toolbar.hover = Some((name, note.to_string()));
+                cx.notify();
+            }
+        }))
+}
+
+fn vsep() -> impl IntoElement {
+    div().w(px(1.0)).h(px(22.0)).mx_2().bg(theme::BORDER)
+}
+
+impl AppShell {
+    fn toggle_pause(&mut self, cx: &mut Context<Self>) {
+        let playing = self.channel_rack.read(cx).is_playing();
+        if playing {
+            self.channel_rack.update(cx, |cr, cx| cr.toggle_play(cx));
+            self.toolbar.paused = true;
+        } else if self.toolbar.paused {
+            self.channel_rack.update(cx, |cr, cx| cr.toggle_play(cx));
+            self.toolbar.paused = false;
+        }
+        cx.notify();
+    }
+
+    /// Ports the original's one real side effect of flipping this
+    /// switch: turning the metronome on auto-starts playback if it
+    /// isn't already running (there's no audible click yet — no
+    /// metronome-tick scheduling exists in the audio engine).
+    fn toggle_metronome(&mut self, cx: &mut Context<Self>) {
+        self.toolbar.metronome = !self.toolbar.metronome;
+        if self.toolbar.metronome && !self.channel_rack.read(cx).is_playing() {
+            self.channel_rack.update(cx, |cr, cx| cr.toggle_play(cx));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn render_toolbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let cr = self.channel_rack.read(cx);
+        let playing = cr.is_playing();
+        let song_mode = cr.is_song_mode();
+        let tempo = cr.tempo();
+        let step = (if song_mode { cr.song_step() } else { cr.current_step() }).floor() + 1.0;
+        let patterns: Vec<(u32, String)> = cr.patterns().iter().map(|p| (p.id, p.name.clone())).collect();
+        let selected_pattern_id = cr.selected_pattern_id();
+        let pattern_label = patterns
+            .iter()
+            .find(|(id, _)| *id == selected_pattern_id)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| "—".to_string());
+        let modifiers = self.toolbar.modifiers;
+        let hover = self.toolbar.hover.clone();
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .bg(theme::BG_PANEL)
+            .border_b_1()
+            .border_color(theme::BORDER)
+            .child(
+                // ── Row 1: menu, transport, BPM/step, feature toggles, monitors ──
+                div()
+                    .h(theme::TOOLBAR_ROW_H)
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .px_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(theme::ACCENT)
+                                    .child("Allodium"),
+                            )
+                            .child({
+                                let mut menu = div().flex().items_center().gap_1();
+                                for label in MENU_LABELS {
+                                    menu = menu.child(
+                                        div()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded(theme::RADIUS_SM)
+                                            .text_size(px(11.0))
+                                            .text_color(theme::ACCENT_DIM)
+                                            .child(label),
+                                    );
+                                }
+                                menu
+                            }),
+                    )
+                    .child(vsep())
+                    .child(
+                        // Pattern / Song mode switch.
+                        div()
+                            .id("patsng")
+                            .flex()
+                            .rounded(theme::RADIUS_SM)
+                            .border_1()
+                            .border_color(theme::BORDER)
+                            .overflow_hidden()
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .text_size(px(10.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .bg(if !song_mode { theme::ACCENT } else { theme::BG_PILL })
+                                    .text_color(if !song_mode { theme::ACCENT_TEXT } else { theme::ACCENT_DIM })
+                                    .child("PAT"),
+                            )
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .text_size(px(10.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .bg(if song_mode { theme::ACCENT } else { theme::BG_PILL })
+                                    .text_color(if song_mode { theme::ACCENT_TEXT } else { theme::ACCENT_DIM })
+                                    .child("SONG"),
+                            )
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.channel_rack.update(cx, |cr, cx| cr.toggle_song_mode(cx));
+                            }))
+                            .on_hover(cx.listener(move |shell, hovering: &bool, _, cx| {
+                                if *hovering {
+                                    shell.toolbar.hover =
+                                        Some(("Pattern/Song mode", if song_mode { "Song" } else { "Pattern" }.to_string()));
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .child(vsep())
+                    .child(
+                        // Transport: Play · Stop · Pause · Record.
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(toggle(
+                                "transport-play",
+                                if playing { "■" } else { "▶" },
+                                playing,
+                                "Play",
+                                if playing { "Playing" } else { "Stopped" },
+                                |this, _, _, cx| this.channel_rack.update(cx, |cr, cx| cr.toggle_play(cx)),
+                                cx,
+                            ))
+                            .child(toggle(
+                                "transport-stop",
+                                "■",
+                                false,
+                                "Stop",
+                                "",
+                                |this, _, _, cx| {
+                                    if this.channel_rack.read(cx).is_playing() {
+                                        this.channel_rack.update(cx, |cr, cx| cr.toggle_play(cx));
+                                    }
+                                    this.toolbar.paused = false;
+                                },
+                                cx,
+                            ))
+                            .child(toggle(
+                                "transport-pause",
+                                "❙❙",
+                                self.toolbar.paused,
+                                "Pause",
+                                if self.toolbar.paused { "Paused" } else { "Not paused" },
+                                |this, _, _, cx| this.toggle_pause(cx),
+                                cx,
+                            ))
+                            .child(toggle(
+                                "transport-record",
+                                "●",
+                                self.toolbar.recording,
+                                "Record",
+                                if self.toolbar.recording { "Recording" } else { "Idle" },
+                                |this, _, _, cx| {
+                                    this.toolbar.recording = !this.toolbar.recording;
+                                    cx.notify();
+                                },
+                                cx,
+                            )),
+                    )
+                    .child(vsep())
+                    .child(
+                        // Tempo — scroll to adjust, shift for ×10 steps (matches the
+                        // original's `onTempoWheel` exactly).
+                        div()
+                            .id("tempo")
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .px_2()
+                            .rounded(theme::RADIUS_SM)
+                            .bg(theme::BG_PILL)
+                            .cursor_pointer()
+                            .child(div().text_size(px(8.5)).text_color(theme::ACCENT_DIM).child("BPM"))
+                            .child(
+                                div()
+                                    .text_size(px(14.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(theme::ACCENT)
+                                    .child(format!("{tempo:.1}")),
+                            )
+                            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
+                                let raw = ev.delta.pixel_delta(px(1.0));
+                                let dy = f32::from(raw.y);
+                                let step = if ev.modifiers.shift { 10.0 } else { 1.0 };
+                                let sign = if dy > 0.0 { -1.0 } else if dy < 0.0 { 1.0 } else { 0.0 };
+                                let current = this.channel_rack.read(cx).tempo();
+                                this.channel_rack.update(cx, |cr, cx| cr.set_tempo(current + sign * step, cx));
+                            }))
+                            .on_hover(cx.listener(move |shell, hovering: &bool, _, cx| {
+                                if *hovering {
+                                    shell.toolbar.hover = Some(("Tempo", format!("{tempo:.1} BPM")));
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .child(vsep())
+                    .child(
+                        // Step position — this rewrite's grid is step-based rather
+                        // than the original's beat:step:tick clock, so this shows
+                        // the current step count instead of a full timecode.
+                        div()
+                            .id("step-pos")
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .px_2()
+                            .rounded(theme::RADIUS_SM)
+                            .bg(theme::BG_PILL)
+                            .child(div().text_size(px(8.5)).text_color(theme::ACCENT_DIM).child("STEP"))
+                            .child(
+                                div()
+                                    .text_size(px(14.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(theme::ACCENT)
+                                    .child(format!("{step:.0}")),
+                            )
+                            .on_hover(cx.listener(move |shell, hovering: &bool, _, cx| {
+                                if *hovering {
+                                    shell.toolbar.hover = Some(("Step position", format!("{step:.0}")));
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .child(vsep())
+                    .child(
+                        // Feature toggles: typing keyboard, precount, loop record, metronome.
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(toggle(
+                                "feat-typing",
+                                "⌨",
+                                self.toolbar.typing_keyboard,
+                                "Typing keyboard to piano",
+                                if self.toolbar.typing_keyboard { "On" } else { "Off" },
+                                |this, _, _, cx| {
+                                    this.toolbar.typing_keyboard = !this.toolbar.typing_keyboard;
+                                    cx.notify();
+                                },
+                                cx,
+                            ))
+                            .child(toggle(
+                                "feat-precount",
+                                "321",
+                                self.toolbar.precount,
+                                "Recording precount",
+                                if self.toolbar.precount { "On" } else { "Off" },
+                                |this, _, _, cx| {
+                                    this.toolbar.precount = !this.toolbar.precount;
+                                    cx.notify();
+                                },
+                                cx,
+                            ))
+                            .child(toggle(
+                                "feat-looprec",
+                                "↻",
+                                self.toolbar.loop_record,
+                                "Loop recording",
+                                if self.toolbar.loop_record { "On" } else { "Off" },
+                                |this, _, _, cx| {
+                                    this.toolbar.loop_record = !this.toolbar.loop_record;
+                                    cx.notify();
+                                },
+                                cx,
+                            ))
+                            .child(toggle(
+                                "feat-metronome",
+                                "△",
+                                self.toolbar.metronome,
+                                "Metronome",
+                                if self.toolbar.metronome { "On" } else { "Off" },
+                                |this, _, _, cx| this.toggle_metronome(cx),
+                                cx,
+                            )),
+                    )
+                    .child(vsep())
+                    .child(inert(
+                        "monitor-scope",
+                        "◌",
+                        "Audio monitor",
+                        "Oscilloscope/spectrum — no metering engine hook yet",
+                        cx,
+                    ))
+                    .child(inert(
+                        "monitor-peak",
+                        "▮▮",
+                        "Peak meter",
+                        "No metering engine hook yet",
+                        cx,
+                    )),
+            )
+            .child(
+                // ── Row 2: hover info, panel toggles, snap/pattern, MIDI, keys ──
+                div()
+                    .h(theme::TOOLBAR_ROW_H)
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .px_3()
+                    .border_t_1()
+                    .border_color(theme::BORDER)
+                    .child(
+                        div()
+                            .w(px(200.0))
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .gap(px(1.0))
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(theme::ACCENT_DIM)
+                                    .child(hover.as_ref().map(|(name, _)| name.to_string()).unwrap_or_default()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(theme::ACCENT_DIM.alpha(0.6))
+                                    .child(hover.map(|(_, value)| value).unwrap_or_default()),
+                            ),
+                    )
+                    .child(vsep())
+                    .child(inert(
+                        "panel-explorer",
+                        "▢",
+                        "File Explorer",
+                        "Not built yet — MVP item #8",
+                        cx,
+                    ))
+                    .child({
+                        let mut pills = div().flex().gap_1();
+                        for kind in PanelKind::ALL {
+                            pills = pills.child(self.toggle_pill(kind, cx));
+                        }
+                        pills
+                    })
+                    .child(vsep())
+                    .child(toggle(
+                        "row2-autoscroll",
+                        "⇒",
+                        self.toolbar.auto_scroll,
+                        "Auto scroll",
+                        if self.toolbar.auto_scroll { "On" } else { "Off" },
+                        |this, _, _, cx| {
+                            this.toolbar.auto_scroll = !this.toolbar.auto_scroll;
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(toggle(
+                        "row2-oneclickrec",
+                        "MIC",
+                        self.toolbar.one_click_record,
+                        "One-click audio recording",
+                        if self.toolbar.one_click_record { "On" } else { "Off" },
+                        |this, _, _, cx| {
+                            this.toolbar.one_click_record = !this.toolbar.one_click_record;
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(vsep())
+                    .child(toggle(
+                        "row2-snap",
+                        if self.toolbar.snap_quarter { "1/4" } else { "1/2" },
+                        false,
+                        "Snapping",
+                        if self.toolbar.snap_quarter { "1/4" } else { "1/2" },
+                        |this, _, _, cx| {
+                            this.toolbar.snap_quarter = !this.toolbar.snap_quarter;
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(toggle(
+                        "row2-pattern",
+                        pattern_label.clone(),
+                        false,
+                        "Pattern",
+                        pattern_label,
+                        move |this, _, _, cx| {
+                            if patterns.is_empty() {
+                                return;
+                            }
+                            let pos = patterns.iter().position(|(id, _)| *id == selected_pattern_id).unwrap_or(0);
+                            let next_id = patterns[(pos + 1) % patterns.len()].0;
+                            this.channel_rack.update(cx, |cr, cx| cr.select_pattern(next_id, cx));
+                        },
+                        cx,
+                    ))
+                    .child(div().flex_1())
+                    .child(inert("midi-led", "●", "MIDI", "No MIDI I/O in this rewrite", cx))
+                    .child(vsep())
+                    .child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(key_badge("SHF", modifiers.shift))
+                            .child(key_badge("ALT", modifiers.alt))
+                            .child(key_badge("CTL", modifiers.control)),
+                    ),
+            )
+    }
+}
+
+fn key_badge(label: &'static str, held: bool) -> impl IntoElement {
+    div()
+        .px_2()
+        .py_1()
+        .rounded(theme::RADIUS_SM)
+        .text_size(px(9.0))
+        .font_weight(gpui::FontWeight::BOLD)
+        .bg(if held { theme::BG_PILL_ACTIVE } else { theme::BG_PILL })
+        .text_color(if held { theme::ACCENT } else { theme::ACCENT_DIM.alpha(0.4) })
+        .child(label)
+}

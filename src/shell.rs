@@ -1,9 +1,9 @@
-//! The app shell: one toolbar row + a floating-window workspace.
-//! Channel Rack, Piano Roll, Playlist, and Mixer are draggable/
-//! resizable/closable panels (see `src/floating_panel.rs`), reopened via
-//! the toolbar's toggle pills — the original app's "window-based" model,
-//! redesigned fresh rather than ported. See
-//! `docs/stage-08-visual-redesign.md`.
+//! The app shell: a two-row toolbar (see `src/toolbar.rs`) + a floating-
+//! window workspace. Channel Rack, Piano Roll, Playlist, and Mixer are
+//! draggable/resizable/closable panels (see `src/floating_panel.rs`),
+//! reopened via the toolbar's toggle pills — the original app's
+//! "window-based" model, redesigned fresh rather than ported. See
+//! `docs/stage-08-visual-redesign.md` and `docs/stage-09-toolbar.md`.
 
 use std::sync::Arc;
 
@@ -21,13 +21,6 @@ use crate::perf::FrameStats;
 use crate::piano_roll::PianoRoll;
 use crate::playlist::Playlist;
 use crate::theme;
-
-/// The original's File/Edit/… menu names, kept as inert labels for now —
-/// none of them have a real action behind them yet (autosave already
-/// covers File > Save with no explicit step, and there's no Preferences
-/// UI for Edit yet per `daw-rewrite-starter/02-feature-scope.md`), so
-/// this is chrome in the original's position, not working dropdowns.
-const MENU_LABELS: [&str; 6] = ["File", "Edit", "View", "Options", "Tools", "Help"];
 
 struct PanelGeometries {
     channel_rack: PanelGeometry,
@@ -77,13 +70,14 @@ impl Default for PanelGeometries {
 
 pub struct AppShell {
     frame_stats: FrameStats,
-    channel_rack: Entity<ChannelRack>,
+    pub(crate) channel_rack: Entity<ChannelRack>,
     piano_roll: Entity<PianoRoll>,
     playlist: Entity<Playlist>,
     mixer: Entity<Mixer>,
     geometry: PanelGeometries,
     z_order: Vec<PanelKind>,
     drag: Option<PanelDrag>,
+    pub(crate) toolbar: crate::toolbar::ToolbarState,
 }
 
 impl AppShell {
@@ -101,6 +95,7 @@ impl AppShell {
             geometry: PanelGeometries::default(),
             z_order: PanelKind::ALL.to_vec(),
             drag: None,
+            toolbar: crate::toolbar::ToolbarState::default(),
         }
     }
 
@@ -165,7 +160,7 @@ impl AppShell {
         }
     }
 
-    fn toggle_pill(&self, kind: PanelKind, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn toggle_pill(&self, kind: PanelKind, cx: &mut Context<Self>) -> impl IntoElement {
         let open = self.geometry.get(kind).open;
         let frontmost = open && self.is_frontmost(kind);
         let mut pill = div()
@@ -250,53 +245,7 @@ impl Render for AppShell {
             .flex_col()
             .bg(theme::BG_APP)
             .font_family(theme::FONT_UI)
-            .child(
-                div()
-                    .h(theme::TOOLBAR_H)
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_3()
-                    .bg(theme::BG_PANEL)
-                    .border_b_1()
-                    .border_color(theme::BORDER)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_size(px(13.0))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(theme::ACCENT)
-                                    .child("Allodium"),
-                            )
-                            .child({
-                                let mut menu = div().flex().items_center().gap_1();
-                                for label in MENU_LABELS {
-                                    menu = menu.child(
-                                        div()
-                                            .px_2()
-                                            .py_1()
-                                            .rounded(theme::RADIUS_SM)
-                                            .text_size(px(11.0))
-                                            .text_color(theme::ACCENT_DIM)
-                                            .child(label),
-                                    );
-                                }
-                                menu
-                            }),
-                    )
-                    .child({
-                        let mut pills = div().flex().gap_1();
-                        for kind in PanelKind::ALL {
-                            pills = pills.child(self.toggle_pill(kind, cx));
-                        }
-                        pills
-                    }),
-            )
+            .child(self.render_toolbar(cx))
             .child(
                 div()
                     .relative()
@@ -305,6 +254,7 @@ impl Render for AppShell {
                     .overflow_hidden()
                     .bg(theme::BG_APP)
                     .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                        this.toolbar.modifiers = ev.modifiers;
                         if this.drag.is_some() {
                             this.update_drag(ev.position, cx);
                         }

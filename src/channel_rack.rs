@@ -86,6 +86,21 @@ impl ChannelRack {
         self.engine.is_playing()
     }
 
+    pub fn tempo(&self) -> f64 {
+        self.project.tempo
+    }
+
+    /// Live-updates the engine's BPM immediately if playing (`set_bpm`),
+    /// matching the original's scroll-to-adjust toolbar tempo display.
+    pub fn set_tempo(&mut self, tempo: f64, cx: &mut Context<Self>) {
+        self.project.tempo = tempo.clamp(20.0, 999.0);
+        if self.engine.is_playing() {
+            self.engine.set_bpm(self.project.tempo);
+        }
+        self.save();
+        cx.notify();
+    }
+
     pub fn current_step(&self) -> f64 {
         self.engine.current_step()
     }
@@ -445,7 +460,7 @@ impl ChannelRack {
         cx.notify();
     }
 
-    fn toggle_play(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_play(&mut self, cx: &mut Context<Self>) {
         if self.engine.is_playing() {
             self.engine.stop();
         } else {

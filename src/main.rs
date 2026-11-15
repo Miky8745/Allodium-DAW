@@ -8,6 +8,7 @@ mod playlist;
 mod project;
 mod shell;
 mod theme;
+mod toolbar;
 
 use std::sync::Arc;
 use std::time::Duration;

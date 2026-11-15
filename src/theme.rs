@@ -49,9 +49,14 @@ pub const RADIUS_SM: Pixels = px(6.0);
 pub const RADIUS_MD: Pixels = px(10.0);
 pub const RADIUS_LG: Pixels = px(14.0);
 
-// Toolbar layout — one row only (see `docs/stage-08-visual-redesign.md`
-// for why the second, always-empty row was dropped).
-pub const TOOLBAR_H: Pixels = px(42.0);
+// Toolbar layout — back to two rows (see `docs/stage-08-visual-redesign.md`
+// for why the row was originally dropped: it was *empty*; the toolbar
+// rebuild documented in `docs/stage-09-toolbar.md` gave row 2 real content
+// — panel toggles, pattern/snap pickers, modifier-key badges — so the
+// second row earns its place back). Each row sizes to this height; the
+// toolbar's total height is just the two rows stacked, not a separate
+// constant.
+pub const TOOLBAR_ROW_H: Pixels = px(34.0);
 
 /// The desktop's actual installed/used font — confirmed via a direct
 /// config audit (waybar, swaync, wlogout, alacritty all pin this exact
