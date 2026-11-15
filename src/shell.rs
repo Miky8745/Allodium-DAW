@@ -22,6 +22,13 @@ use crate::piano_roll::PianoRoll;
 use crate::playlist::Playlist;
 use crate::theme;
 
+/// The original's File/Edit/… menu names, kept as inert labels for now —
+/// none of them have a real action behind them yet (autosave already
+/// covers File > Save with no explicit step, and there's no Preferences
+/// UI for Edit yet per `daw-rewrite-starter/02-feature-scope.md`), so
+/// this is chrome in the original's position, not working dropdowns.
+const MENU_LABELS: [&str; 6] = ["File", "Edit", "View", "Options", "Tools", "Help"];
+
 struct PanelGeometries {
     channel_rack: PanelGeometry,
     piano_roll: PanelGeometry,
@@ -256,10 +263,31 @@ impl Render for AppShell {
                     .border_color(theme::BORDER)
                     .child(
                         div()
-                            .text_size(px(13.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(theme::ACCENT)
-                            .child("Allodium"),
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(theme::ACCENT)
+                                    .child("Allodium"),
+                            )
+                            .child({
+                                let mut menu = div().flex().items_center().gap_1();
+                                for label in MENU_LABELS {
+                                    menu = menu.child(
+                                        div()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded(theme::RADIUS_SM)
+                                            .text_size(px(11.0))
+                                            .text_color(theme::ACCENT_DIM)
+                                            .child(label),
+                                    );
+                                }
+                                menu
+                            }),
                     )
                     .child({
                         let mut pills = div().flex().gap_1();
