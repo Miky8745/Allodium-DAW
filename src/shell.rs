@@ -7,9 +7,10 @@
 
 use std::sync::Arc;
 
+use gpui::component::input::{InputEvent, InputState};
 use gpui::component::{Icon, Sizable};
 use gpui::{
-    AppContext, ClickEvent, Context, Entity, IntoElement, MouseButton, MouseDownEvent,
+    AppContext, ClickEvent, Context, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Styled, Window, div,
     linear_color_stop, linear_gradient, point, prelude::*, px, size,
 };
@@ -79,12 +80,27 @@ pub struct AppShell {
     geometry: PanelGeometries,
     z_order: Vec<PanelKind>,
     drag: Option<PanelDrag>,
+    tempo_drag: Option<TempoDrag>,
     pub(crate) toolbar: crate::toolbar::ToolbarState,
     /// Created once here rather than inside the Preferences dialog's own
     /// `open_dialog` builder — that builder can re-run on every rebuild
     /// while the dialog is open, and a fresh `cx.new(...)` each time would
     /// reset the selected tab back to General.
     pub(crate) preferences: Entity<Preferences>,
+    /// Backs the toolbar's double-click-to-type-a-BPM field. Created once
+    /// here (not inside `render_toolbar`, which reruns every frame) so its
+    /// text and focus survive across renders while editing is open.
+    pub(crate) tempo_input: Entity<InputState>,
+}
+
+/// Dragging the BPM pill vertically nudges tempo by whole BPM per pixel of
+/// travel — the same gesture the scroll wheel offers, just continuous
+/// instead of stepped, and (unlike scroll) guaranteed to actually reach
+/// this code: trackpads and some mice report wheel deltas GPUI's
+/// `ScrollEvent` doesn't always see on this platform.
+struct TempoDrag {
+    start_mouse_y: Pixels,
+    start_tempo: f64,
 }
 
 impl AppShell {
@@ -94,6 +110,12 @@ impl AppShell {
         let playlist = cx.new(|cx| Playlist::new(channel_rack.clone(), window, cx));
         let mixer = cx.new(|cx| Mixer::new(channel_rack.clone(), window, cx));
         let preferences = cx.new(|_| Preferences::new());
+        let tempo_input = cx.new(|cx| InputState::new(window, cx));
+        cx.subscribe(&tempo_input, |this: &mut Self, _input, event: &InputEvent, cx| match event {
+            InputEvent::PressEnter { .. } | InputEvent::Blur => this.commit_tempo_edit(cx),
+            _ => {}
+        })
+        .detach();
         Self {
             frame_stats: FrameStats::new(),
             channel_rack,
@@ -103,9 +125,51 @@ impl AppShell {
             geometry: PanelGeometries::default(),
             z_order: PanelKind::ALL.to_vec(),
             drag: None,
+            tempo_drag: None,
             toolbar: crate::toolbar::ToolbarState::default(),
             preferences,
+            tempo_input,
         }
+    }
+
+    pub(crate) fn begin_tempo_drag(&mut self, mouse_y: Pixels, cx: &mut Context<Self>) {
+        if self.toolbar.editing_tempo {
+            return;
+        }
+        let start_tempo = self.channel_rack.read(cx).tempo();
+        self.tempo_drag = Some(TempoDrag { start_mouse_y: mouse_y, start_tempo });
+    }
+
+    fn update_tempo_drag(&mut self, mouse_y: Pixels, cx: &mut Context<Self>) {
+        let Some(drag) = &self.tempo_drag else { return };
+        // Up is higher tempo, matching the scroll handler's sign convention.
+        let delta = f32::from(drag.start_mouse_y - mouse_y) as f64;
+        let next = drag.start_tempo + delta;
+        self.channel_rack.update(cx, |cr, cx| cr.set_tempo(next, cx));
+    }
+
+    fn end_tempo_drag(&mut self) {
+        self.tempo_drag = None;
+    }
+
+    pub(crate) fn start_edit_tempo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tempo_drag = None;
+        let tempo = self.channel_rack.read(cx).tempo();
+        self.tempo_input.update(cx, |s, cx| s.set_value(format!("{tempo:.1}"), window, cx));
+        self.toolbar.editing_tempo = true;
+        self.tempo_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn commit_tempo_edit(&mut self, cx: &mut Context<Self>) {
+        if !self.toolbar.editing_tempo {
+            return;
+        }
+        if let Ok(tempo) = self.tempo_input.read(cx).value().trim().parse::<f64>() {
+            self.channel_rack.update(cx, |cr, cx| cr.set_tempo(tempo, cx));
+        }
+        self.toolbar.editing_tempo = false;
+        cx.notify();
     }
 
     fn is_frontmost(&self, kind: PanelKind) -> bool {
@@ -259,6 +323,28 @@ impl Render for AppShell {
             .flex_col()
             .bg(theme::BG_APP)
             .font_family(theme::FONT_UI)
+            // Mouse tracking for both drag gestures (floating panels, the
+            // BPM pill) lives on this outer root rather than the workspace
+            // div below: a drag that starts on the toolbar's tempo pill
+            // must keep tracking even while the pointer wanders outside
+            // the workspace's own bounds.
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                this.toolbar.modifiers = ev.modifiers;
+                if this.drag.is_some() {
+                    this.update_drag(ev.position, cx);
+                }
+                if this.tempo_drag.is_some() {
+                    this.update_tempo_drag(ev.position.y, cx);
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                this.end_drag(cx);
+                this.end_tempo_drag();
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                this.end_drag(cx);
+                this.end_tempo_drag();
+            }))
             .child(self.render_toolbar(cx))
             .child(
                 div()
@@ -273,14 +359,6 @@ impl Render for AppShell {
                     // read as glass rather than just a slightly different
                     // flat color.
                     .bg(linear_gradient(135.0, linear_color_stop(theme::accent().alpha(0.05), 0.0), linear_color_stop(theme::CANVAS_BG, 0.5)))
-                    .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
-                        this.toolbar.modifiers = ev.modifiers;
-                        if this.drag.is_some() {
-                            this.update_drag(ev.position, cx);
-                        }
-                    }))
-                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_drag(cx)))
-                    .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_drag(cx)))
                     .child(workspace),
             )
     }

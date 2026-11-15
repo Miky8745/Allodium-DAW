@@ -41,10 +41,14 @@
 
 use gpui::assets::IconName;
 use gpui::component::button::{Button, ButtonVariants, Toggle, ToggleGroup, ToggleVariants};
+use gpui::component::input::Input;
 use gpui::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui::component::separator::Separator;
 use gpui::component::{Disableable, Icon, Sizable, WindowExt};
-use gpui::{BoxShadow, Context, Hsla, IntoElement, Modifiers, ParentElement, ScrollEvent, Styled, Window, div, point, prelude::*, px};
+use gpui::{
+    BoxShadow, ClickEvent, Context, Hsla, IntoElement, MouseButton, MouseDownEvent, Modifiers,
+    ParentElement, ScrollEvent, Styled, Window, div, point, prelude::*, px,
+};
 
 use crate::floating_panel::PanelKind;
 use crate::preferences;
@@ -70,6 +74,10 @@ pub struct ToolbarState {
     auto_scroll: bool,
     one_click_record: bool,
     snap_quarter: bool,
+    /// Whether the BPM pill is showing `shell::AppShell::tempo_input`
+    /// (double-click to type an exact value) instead of the chevron/value
+    /// display.
+    pub(crate) editing_tempo: bool,
 }
 
 impl Default for ToolbarState {
@@ -86,6 +94,7 @@ impl Default for ToolbarState {
             auto_scroll: false,
             one_click_record: false,
             snap_quarter: true, // matches the original's default `snapping = '1/4'`
+            editing_tempo: false,
         }
     }
 }
@@ -198,6 +207,27 @@ fn inert(id: impl Into<gpui::ElementId>, icon: IconName, name: &'static str, not
             }
         }))
         .child(Toggle::new(id).w(px(28.0)).h(px(26.0)).disabled(true).child(Icon::new(icon).small()))
+}
+
+/// A tiny click target that nudges the tempo by `delta` BPM — the
+/// discoverable counterpart to the tempo pill's scroll-to-adjust gesture.
+fn tempo_step_btn(id: impl Into<gpui::ElementId>, icon: IconName, delta: f64, cx: &mut Context<AppShell>) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .w(px(14.0))
+        .h(px(14.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(theme::RADIUS_XS)
+        .cursor_pointer()
+        .text_color(theme::accent_dim())
+        .hover(|s| s.bg(theme::BTN_HOVER).text_color(theme::accent()))
+        .child(Icon::new(icon).xsmall())
+        .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+            let current = this.channel_rack.read(cx).tempo();
+            this.channel_rack.update(cx, |cr, cx| cr.set_tempo(current + delta, cx));
+        }))
 }
 
 fn vsep() -> impl IntoElement {
@@ -396,10 +426,17 @@ impl AppShell {
                             )),
                     )
                     .child(vsep())
-                    .child(
-                        // Tempo — scroll to adjust, shift for ×10 steps (matches the
-                        // original's `onTempoWheel` exactly).
-                        div()
+                    .child({
+                        // Tempo — three ways in, all landing on the same
+                        // `set_tempo`: scroll (shift for ×10 steps, matches
+                        // the original's `onTempoWheel`), the chevrons
+                        // (guaranteed click path), and a vertical drag on the
+                        // pill itself (continuous, and — unlike scroll —
+                        // not dependent on this platform's wheel-event
+                        // reporting). Double-click swaps the display for
+                        // `AppShell::tempo_input` to type an exact value.
+                        let editing = self.toolbar.editing_tempo;
+                        let mut pill = div()
                             .id("tempo")
                             .flex()
                             .flex_col()
@@ -408,16 +445,47 @@ impl AppShell {
                             .py_0p5()
                             .rounded(theme::RADIUS_SM)
                             .bg(theme::SLATE)
-                            .cursor_pointer()
+                            .when(!editing, |d| d.cursor_ns_resize())
                             .hover(|s| s.bg(theme::BTN_HOVER))
-                            .child(div().text_size(px(8.5)).text_color(theme::accent_dim()).child("BPM"))
-                            .child(
-                                div()
-                                    .text_size(px(14.0))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(theme::accent())
-                                    .child(format!("{tempo:.1}")),
+                            .child(div().text_size(px(8.5)).text_color(theme::accent_dim()).child("BPM"));
+                        pill = if editing {
+                            pill.child(
+                                div().w(px(56.0)).child(
+                                    Input::new(&self.tempo_input)
+                                        .appearance(false)
+                                        .text_size(px(14.0))
+                                        .text_align(gpui::TextAlign::Center)
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(theme::accent()),
+                                ),
                             )
+                        } else {
+                            pill.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(tempo_step_btn("tempo-dec", IconName::ChevronDown, -1.0, cx))
+                                    .child(
+                                        div()
+                                            .min_w(px(36.0))
+                                            .text_size(px(14.0))
+                                            .text_align(gpui::TextAlign::Center)
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(theme::accent())
+                                            .child(format!("{tempo:.1}")),
+                                    )
+                                    .child(tempo_step_btn("tempo-inc", IconName::ChevronUp, 1.0, cx)),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, ev: &MouseDownEvent, _, cx| this.begin_tempo_drag(ev.position.y, cx)),
+                            )
+                            .on_click(cx.listener(|this, ev: &ClickEvent, window, cx| {
+                                if ev.click_count() >= 2 {
+                                    this.start_edit_tempo(window, cx);
+                                }
+                            }))
                             .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, cx| {
                                 let raw = ev.delta.pixel_delta(px(1.0));
                                 let dy = f32::from(raw.y);
@@ -431,8 +499,10 @@ impl AppShell {
                                     shell.toolbar.hover = Some(("Tempo", format!("{tempo:.1} BPM")));
                                     cx.notify();
                                 }
-                            })),
-                    )
+                            }))
+                        };
+                        pill
+                    })
                     .child(vsep())
                     .child(
                         // Step position — this rewrite's grid is step-based rather
