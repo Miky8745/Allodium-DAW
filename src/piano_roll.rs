@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use gpui::{
     Context, Entity, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, Render, ScrollWheelEvent, Styled, Window, canvas, div, point,
+    ParentElement, Pixels, Point, Render, ScrollEvent, Styled, Window, canvas, div, point,
     prelude::*, px, quad, rgb, size,
 };
 
@@ -271,7 +271,7 @@ impl Render for PianoRoll {
                     .size_full()
                     .overflow_hidden()
                     .bg(rgb(0x1a1a1a))
-                    .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
+                    .on_scroll(cx.listener(|this, ev: &ScrollEvent, window, cx| {
                         let delta = ev.delta.pixel_delta(px(KEY_H));
                         this.scroll_x -= f32::from(delta.x);
                         this.scroll_y -= f32::from(delta.y);

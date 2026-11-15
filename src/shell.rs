@@ -177,11 +177,15 @@ impl AppShell {
             .child(kind.label())
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_panel(kind, cx)));
         pill = if frontmost {
-            pill.bg(theme::ACCENT).text_color(theme::ACCENT_TEXT)
+            pill.bg(theme::ACCENT).text_color(theme::ACCENT_TEXT).hover(|s| s.bg(theme::ACCENT_HOVER))
         } else if open {
-            pill.bg(theme::BG_PILL).text_color(theme::ACCENT).border_1().border_color(theme::ACCENT_DIM)
+            pill.bg(theme::BG_PILL)
+                .text_color(theme::ACCENT)
+                .border_1()
+                .border_color(theme::ACCENT_DIM)
+                .hover(|s| s.bg(theme::BG_PILL_HOVER))
         } else {
-            pill.bg(theme::BG_PILL).text_color(theme::ACCENT_DIM)
+            pill.bg(theme::BG_PILL).text_color(theme::ACCENT_DIM).hover(|s| s.bg(theme::BG_PILL_HOVER))
         };
         pill
     }

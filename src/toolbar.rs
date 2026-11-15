@@ -26,7 +26,7 @@
 //! file-browser panel exists yet — MVP item #8, still unbuilt).
 
 use gpui::{
-    ClickEvent, Context, IntoElement, Modifiers, ParentElement, ScrollWheelEvent, Styled, Window,
+    ClickEvent, Context, IntoElement, Modifiers, ParentElement, ScrollEvent, Styled, Window,
     div, prelude::*, px,
 };
 
@@ -94,11 +94,13 @@ fn toggle(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(theme::RADIUS_SM)
+        .rounded(theme::RADIUS_XS)
         .text_size(px(11.0))
         .cursor_pointer()
         .bg(if active { theme::BG_PILL_ACTIVE } else { theme::BG_PILL })
         .text_color(if active { theme::ACCENT } else { theme::ACCENT_DIM })
+        .hover(|s| s.bg(theme::BG_PILL_HOVER))
+        .active(|s| s.bg(theme::BG_PILL_ACTIVE))
         .child(content)
         .on_click(cx.listener(on_click))
         .on_hover(cx.listener(move |shell, hovering: &bool, _, cx| {
@@ -126,7 +128,7 @@ fn inert(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(theme::RADIUS_SM)
+        .rounded(theme::RADIUS_XS)
         .text_size(px(11.0))
         .text_color(theme::ACCENT_DIM.alpha(0.5))
         .child(content)
@@ -245,6 +247,7 @@ impl AppShell {
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .bg(if !song_mode { theme::ACCENT } else { theme::BG_PILL })
                                     .text_color(if !song_mode { theme::ACCENT_TEXT } else { theme::ACCENT_DIM })
+                                    .when(song_mode, |d| d.hover(|s| s.bg(theme::BG_PILL_HOVER)))
                                     .child("PAT"),
                             )
                             .child(
@@ -255,6 +258,7 @@ impl AppShell {
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .bg(if song_mode { theme::ACCENT } else { theme::BG_PILL })
                                     .text_color(if song_mode { theme::ACCENT_TEXT } else { theme::ACCENT_DIM })
+                                    .when(!song_mode, |d| d.hover(|s| s.bg(theme::BG_PILL_HOVER)))
                                     .child("SONG"),
                             )
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -333,6 +337,7 @@ impl AppShell {
                             .rounded(theme::RADIUS_SM)
                             .bg(theme::BG_PILL)
                             .cursor_pointer()
+                            .hover(|s| s.bg(theme::BG_PILL_HOVER))
                             .child(div().text_size(px(8.5)).text_color(theme::ACCENT_DIM).child("BPM"))
                             .child(
                                 div()
@@ -341,7 +346,7 @@ impl AppShell {
                                     .text_color(theme::ACCENT)
                                     .child(format!("{tempo:.1}")),
                             )
-                            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
+                            .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, cx| {
                                 let raw = ev.delta.pixel_delta(px(1.0));
                                 let dy = f32::from(raw.y);
                                 let step = if ev.modifiers.shift { 10.0 } else { 1.0 };

@@ -101,8 +101,14 @@ pub fn render_panel(
         .flex()
         .flex_col()
         .overflow_hidden()
-        .rounded(theme::RADIUS_SM)
+        .rounded(theme::RADIUS_MD)
         .bg(theme::BG_PANEL)
+        // A faint rest-state shadow — the thing that actually reads as
+        // "flat ImGUI chrome" wasn't the lack of a border, it was the
+        // total absence of any depth cue at rest. Kept deliberately
+        // faint (not the generic uniform "SaaS card" shadow) and still
+        // distinct from the heavier one that appears while dragging.
+        .shadow_xs()
         .when(focused, |d| d.border(theme::FOCUS_RING_WIDTH).border_color(theme::FOCUS_RING))
         .when(dragging_this, |d| d.shadow_lg())
         .on_any_mouse_down(on_focus)
@@ -130,27 +136,38 @@ pub fn render_panel(
                 .child(
                     div()
                         .id(("panel-close", kind as u8 as usize))
-                        .w(px(16.0))
-                        .h(px(16.0))
+                        .w(px(18.0))
+                        .h(px(18.0))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(px(3.0))
+                        .rounded(theme::RADIUS_XS)
                         .text_color(theme::ACCENT_DIM)
                         .cursor_pointer()
-                        .child("x")
+                        .hover(|s| s.bg(theme::DESTRUCTIVE).text_color(theme::ACCENT_TEXT))
+                        .child("×")
                         .on_click(on_close),
                 ),
         )
         .child(div().flex_1().w_full().overflow_hidden().child(body))
         .child(
             div()
+                .id(("panel-resize", kind as u8 as usize))
                 .absolute()
                 .right_0()
                 .bottom_0()
                 .w(RESIZE_HANDLE_SIZE)
                 .h(RESIZE_HANDLE_SIZE)
+                .flex()
+                .items_end()
+                .justify_end()
+                .px(px(2.0))
+                .pb(px(1.0))
                 .cursor_default()
+                .text_size(px(9.0))
+                .text_color(theme::ACCENT_DIM.alpha(0.35))
+                .hover(|s| s.text_color(theme::ACCENT_DIM))
+                .child("⋰")
                 .on_mouse_down(MouseButton::Left, on_resize_start),
         )
 }

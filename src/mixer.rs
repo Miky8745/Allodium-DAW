@@ -169,9 +169,11 @@ impl Render for Mixer {
                             .child(
                                 div()
                                     .id(("remove-track", id as usize))
-                                    .text_color(theme::MUTE_RED)
+                                    .rounded(theme::RADIUS_XS)
+                                    .text_color(theme::DESTRUCTIVE)
                                     .cursor_pointer()
-                                    .child("x")
+                                    .hover(|s| s.bg(theme::DESTRUCTIVE.alpha(0.15)))
+                                    .child("×")
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         this.channel_rack.update(cx, |rack, cx| rack.remove_mixer_track(id, cx));
                                     })),
@@ -193,8 +195,9 @@ impl Render for Mixer {
                                     .items_center()
                                     .justify_center()
                                     .text_size(px(10.0))
-                                    .bg(if t.muted { theme::MUTE_RED } else { theme::BG_PANEL })
+                                    .bg(if t.muted { theme::DESTRUCTIVE } else { theme::BG_PANEL })
                                     .cursor_pointer()
+                                    .hover(|s| if t.muted { s } else { s.bg(theme::BG_PILL_HOVER) })
                                     .child("M")
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         this.channel_rack.update(cx, |rack, cx| rack.toggle_mixer_mute(id, cx));
@@ -205,13 +208,14 @@ impl Render for Mixer {
                                     .id(("mix-solo", id as usize))
                                     .w(px(24.0))
                                     .h(px(18.0))
-                                    .rounded(px(4.0))
+                                    .rounded(theme::RADIUS_XS)
                                     .flex()
                                     .items_center()
                                     .justify_center()
                                     .text_size(px(10.0))
                                     .bg(if t.soloed { theme::ACCENT } else { theme::BG_PANEL })
                                     .cursor_pointer()
+                                    .hover(|s| if t.soloed { s } else { s.bg(theme::BG_PILL_HOVER) })
                                     .child("S")
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         this.channel_rack.update(cx, |rack, cx| rack.toggle_mixer_solo(id, cx));
@@ -233,6 +237,8 @@ impl Render for Mixer {
                 .bg(theme::BG_PILL)
                 .text_size(px(11.0))
                 .cursor_pointer()
+                .hover(|s| s.bg(theme::BG_PILL_HOVER))
+                .active(|s| s.bg(theme::BG_PILL_ACTIVE))
                 .child("+ Track")
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.channel_rack.update(cx, |rack, cx| rack.add_mixer_track(cx));

@@ -4,7 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gpui = "0.2.2"
+# Renamed via Cargo's package-rename: gpui-kit re-exports the whole real
+# `gpui` namespace (confirmed API-identical to the plain 0.2.2 we used
+# before — see docs/stage-10-gpui-component.md) plus the styled
+# gpui-component widget library at `gpui::component::*`. Every existing
+# `use gpui::{...}` in this codebase keeps working unchanged.
+gpui = { package = "gpui-kit", version = "0.9.1" }
 cpal = "0.15"
 serde = { version = "1", features = ["derive"] }
 quick-xml = { version = "0.41.0", features = ["serialize"] }

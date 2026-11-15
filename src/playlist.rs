@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use gpui::{
     Context, Entity, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, Render, ScrollWheelEvent, Styled, Window, canvas, div, point,
+    ParentElement, Pixels, Point, Render, ScrollEvent, Styled, Window, canvas, div, point,
     prelude::*, px, quad, rgb, size,
 };
 
@@ -340,6 +340,7 @@ impl Render for Playlist {
                     .bg(if is_selected { theme::pattern_color(id) } else { theme::BG_PILL })
                     .text_color(if is_selected { theme::ACCENT_TEXT } else { theme::ACCENT_DIM })
                     .cursor_pointer()
+                    .when(!is_selected, |d| d.hover(|s| s.bg(theme::BG_PILL_HOVER)))
                     .child(name.clone())
                     .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
                         this.channel_rack.update(cx, |rack, cx| rack.select_pattern(id, cx));
@@ -357,6 +358,8 @@ impl Render for Playlist {
                 .text_size(px(10.0))
                 .bg(theme::BG_PILL)
                 .cursor_pointer()
+                .hover(|s| s.bg(theme::BG_PILL_HOVER))
+                .active(|s| s.bg(theme::BG_PILL_ACTIVE))
                 .child("+ Pattern")
                 .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                     this.channel_rack.update(cx, |rack, cx| rack.add_pattern(cx));
@@ -395,7 +398,7 @@ impl Render for Playlist {
                             .relative()
                             .overflow_hidden()
                             .bg(rgb(0x1a1a1a))
-                            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
+                            .on_scroll(cx.listener(|this, ev: &ScrollEvent, window, cx| {
                                 let delta = ev.delta.pixel_delta(px(ROW_H));
                                 this.scroll_x -= f32::from(delta.x);
                                 this.scroll_y -= f32::from(delta.y);

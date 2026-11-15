@@ -23,31 +23,41 @@ pub const BG_PILL_ACTIVE: Hsla = Hsla { h: 228.0 / 360.0, s: 0.10, l: 0.35, a: 0
 pub const ACCENT: Hsla = Hsla { h: 201.0 / 360.0, s: 0.90, l: 0.75, a: 1.0 }; // #7fc8ff
 pub const ACCENT_DIM: Hsla = Hsla { h: 201.0 / 360.0, s: 0.56, l: 0.52, a: 1.0 }; // #4a9bd4
 pub const ACCENT_TEXT: Hsla = Hsla { h: 204.0 / 360.0, s: 0.45, l: 0.08, a: 1.0 }; // #0a1620
+/// Lightened `ACCENT`, for hovering over an already-accent-filled control
+/// (the Play button mid-playback, an active toggle) — without this,
+/// those controls go visually dead on hover since their resting state is
+/// already the brightest color in the palette.
+pub const ACCENT_HOVER: Hsla = Hsla { h: 201.0 / 360.0, s: 0.95, l: 0.84, a: 1.0 };
 
-/// A rare, deliberate warm contrast note — not a second general-purpose
-/// accent. Echoes the desktop wallpaper's own orange-vs-cyan drama
-/// (`~/Background/gargantua-black-...jpg`: a warm amber gas giant against
-/// a cool cyan glow). This is the exact color the Piano Roll/Playlist
-/// delete-flash animations already used as a magic number; naming it here
-/// makes that choice visible instead of accidental. Keep its usage rare.
+/// A second, equally deliberate hue (not a leftover generic "error red")
+/// — every destructive/record/mute affordance in the app routes through
+/// this one name, so the palette reads as "two colors with a job" (cool
+/// accent for active/selected, warm accent for destructive/recording)
+/// rather than an accidental grab-bag of near-identical reds. Echoes the
+/// desktop wallpaper's own orange-vs-cyan drama (`~/Background/
+/// gargantua-black-...jpg`). Keep its usage meaningful, not decorative.
 pub const WARM_ACCENT: Hsla = Hsla { h: 14.0 / 360.0, s: 0.98, l: 0.64, a: 1.0 }; // #ff6a3d
+pub const DESTRUCTIVE: Hsla = WARM_ACCENT;
 
-// Semantic (unchanged genre conventions).
+// Semantic (unchanged genre conventions, reserved for real metering).
 pub const METER_GREEN: Hsla = Hsla { h: 120.0 / 360.0, s: 0.6, l: 0.45, a: 1.0 };
 pub const METER_YELLOW: Hsla = Hsla { h: 50.0 / 360.0, s: 0.85, l: 0.55, a: 1.0 };
-pub const METER_RED: Hsla = Hsla { h: 4.0 / 360.0, s: 0.75, l: 0.55, a: 1.0 };
-pub const RECORD_RED: Hsla = Hsla { h: 4.0 / 360.0, s: 0.75, l: 0.55, a: 1.0 };
-pub const MUTE_RED: Hsla = Hsla { h: 4.0 / 360.0, s: 0.75, l: 0.55, a: 1.0 };
 
 // Borders / chrome.
 pub const BORDER: Hsla = Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.06 };
 pub const FOCUS_RING: Hsla = ACCENT;
 pub const FOCUS_RING_WIDTH: Pixels = px(2.0);
 
-// Radii.
-pub const RADIUS_SM: Pixels = px(6.0);
-pub const RADIUS_MD: Pixels = px(10.0);
-pub const RADIUS_LG: Pixels = px(14.0);
+// Radii — one consistent scale instead of ad hoc per-widget px() literals
+// (the thing that made small controls read as sharp-cornered "ImGUI"
+// chrome even though a radius was technically being applied: 3-4px is
+// imperceptible as rounding on a 16-20px control, it just reads as a
+// rendering imprecision). `RADIUS_XS` is the new floor for anything
+// control-sized; nothing in the app should go below it.
+pub const RADIUS_XS: Pixels = px(5.0);
+pub const RADIUS_SM: Pixels = px(8.0);
+pub const RADIUS_MD: Pixels = px(12.0);
+pub const RADIUS_LG: Pixels = px(16.0);
 
 // Toolbar layout — back to two rows (see `docs/stage-08-visual-redesign.md`
 // for why the row was originally dropped: it was *empty*; the toolbar
