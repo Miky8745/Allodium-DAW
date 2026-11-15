@@ -450,7 +450,20 @@ impl AppShell {
                             .child(div().text_size(px(8.5)).text_color(theme::accent_dim()).child("BPM"));
                         pill = if editing {
                             pill.child(
-                                div().w(px(56.0)).child(
+                                // Generously wide, not sized to exactly fit
+                                // "130.0" — `Input`'s actual rendered glyph
+                                // size didn't reliably match the `.text_size()`
+                                // asked for below, and a box sized to the
+                                // smaller assumed size clipped the end of the
+                                // number (only revealed by the caret's own
+                                // keep-visible scroll when clicking into it).
+                                // Erring wide costs nothing here; erring
+                                // narrow silently eats digits. No fixed
+                                // height either, for the same reason: forcing
+                                // one shorter than the input's own natural
+                                // line height pushed the text out below it
+                                // instead of clipping it horizontally.
+                                div().w(px(92.0)).child(
                                     Input::new(&self.tempo_input)
                                         .appearance(false)
                                         .text_size(px(14.0))

@@ -143,8 +143,19 @@ impl AppShell {
     fn update_tempo_drag(&mut self, mouse_y: Pixels, cx: &mut Context<Self>) {
         let Some(drag) = &self.tempo_drag else { return };
         // Up is higher tempo, matching the scroll handler's sign convention.
-        let delta = f32::from(drag.start_mouse_y - mouse_y) as f64;
-        let next = drag.start_tempo + delta;
+        let raw = f32::from(drag.start_mouse_y - mouse_y) as f64;
+        // Accelerating, not 1:1: GPUI exposes no pointer-warp/lock API on
+        // this platform (confirmed against its own window/platform source —
+        // there's nothing past a read-only `is_cursor_visible`), and Wayland
+        // itself doesn't let an ordinary client warp the system cursor the
+        // way X11's `XWarpPointer` could. "Teleport the cursor to the top
+        // when it hits the bottom" genuinely isn't implementable here, so
+        // this is the practical substitute: the covered range grows with
+        // distance already dragged, so the full 20-999 BPM span fits inside
+        // a few hundred pixels of real travel instead of needing (literally)
+        // a thousand, and a finger's reach of screen rarely runs out.
+        let accelerated = raw.signum() * (raw.abs() + raw.abs().powf(1.6) / 40.0);
+        let next = drag.start_tempo + accelerated;
         self.channel_rack.update(cx, |cr, cx| cr.set_tempo(next, cx));
     }
 
