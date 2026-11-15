@@ -7,10 +7,11 @@
 
 use std::sync::Arc;
 
+use gpui::component::{Icon, Sizable};
 use gpui::{
     AppContext, ClickEvent, Context, Entity, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Styled, Window, div, point,
-    prelude::*, px, size,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Styled, Window, div,
+    linear_color_stop, linear_gradient, point, prelude::*, px, size,
 };
 
 use crate::audio::AudioEngine;
@@ -20,6 +21,7 @@ use crate::mixer::Mixer;
 use crate::perf::FrameStats;
 use crate::piano_roll::PianoRoll;
 use crate::playlist::Playlist;
+use crate::preferences::Preferences;
 use crate::theme;
 
 struct PanelGeometries {
@@ -78,6 +80,11 @@ pub struct AppShell {
     z_order: Vec<PanelKind>,
     drag: Option<PanelDrag>,
     pub(crate) toolbar: crate::toolbar::ToolbarState,
+    /// Created once here rather than inside the Preferences dialog's own
+    /// `open_dialog` builder — that builder can re-run on every rebuild
+    /// while the dialog is open, and a fresh `cx.new(...)` each time would
+    /// reset the selected tab back to General.
+    pub(crate) preferences: Entity<Preferences>,
 }
 
 impl AppShell {
@@ -86,6 +93,7 @@ impl AppShell {
         let piano_roll = cx.new(|cx| PianoRoll::new(channel_rack.clone(), window, cx));
         let playlist = cx.new(|cx| Playlist::new(channel_rack.clone(), window, cx));
         let mixer = cx.new(|cx| Mixer::new(channel_rack.clone(), window, cx));
+        let preferences = cx.new(|_| Preferences::new());
         Self {
             frame_stats: FrameStats::new(),
             channel_rack,
@@ -96,6 +104,7 @@ impl AppShell {
             z_order: PanelKind::ALL.to_vec(),
             drag: None,
             toolbar: crate::toolbar::ToolbarState::default(),
+            preferences,
         }
     }
 
@@ -160,32 +169,33 @@ impl AppShell {
         }
     }
 
+    /// Icon-only, borderless — Allodium-tauri's own `.tb-pb` panel-toggle
+    /// treatment, not a labeled pill. Three states instead of the
+    /// original's two: closed (neutral), open-but-behind-another-panel
+    /// (a faint accent tint — this rewrite's own floating-window z-order
+    /// concept, which the original's always-only-one-visible-window model
+    /// never needed), and frontmost (full accent + glow).
     pub(crate) fn toggle_pill(&self, kind: PanelKind, cx: &mut Context<Self>) -> impl IntoElement {
         let open = self.geometry.get(kind).open;
         let frontmost = open && self.is_frontmost(kind);
         let mut pill = div()
             .id(("panel-toggle", kind as u8 as usize))
-            .h(px(26.0))
-            .px_2()
+            .w(px(34.0))
+            .h(px(34.0))
             .rounded(theme::RADIUS_SM)
             .flex()
             .items_center()
-            .gap_1()
-            .text_size(px(11.0))
+            .justify_center()
             .cursor_pointer()
-            .child(div().child(kind.glyph()))
-            .child(kind.label())
+            .child(Icon::new(kind.icon()).small())
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_panel(kind, cx)));
+        let identity = kind.identity_color();
         pill = if frontmost {
-            pill.bg(theme::ACCENT).text_color(theme::ACCENT_TEXT).hover(|s| s.bg(theme::ACCENT_HOVER))
+            pill.bg(identity.alpha(0.14)).text_color(identity).shadow(crate::toolbar::glow(identity))
         } else if open {
-            pill.bg(theme::BG_PILL)
-                .text_color(theme::ACCENT)
-                .border_1()
-                .border_color(theme::ACCENT_DIM)
-                .hover(|s| s.bg(theme::BG_PILL_HOVER))
+            pill.bg(identity.alpha(0.08)).text_color(identity).hover(|s| s.bg(theme::BTN_HOVER))
         } else {
-            pill.bg(theme::BG_PILL).text_color(theme::ACCENT_DIM).hover(|s| s.bg(theme::BG_PILL_HOVER))
+            pill.text_color(theme::BTN_TEXT).hover(|s| s.bg(theme::BTN_HOVER).text_color(theme::MAIN_TEXT))
         };
         pill
     }
@@ -256,7 +266,13 @@ impl Render for AppShell {
                     .flex_1()
                     .w_full()
                     .overflow_hidden()
-                    .bg(theme::BG_APP)
+                    // A faint directional wash of the active accent, not a
+                    // flat fill — GPUI has no backdrop-filter/blur, so the
+                    // floating panels' translucent fill (`floating_panel.rs`)
+                    // needs *something* with visible variation behind it to
+                    // read as glass rather than just a slightly different
+                    // flat color.
+                    .bg(linear_gradient(135.0, linear_color_stop(theme::accent().alpha(0.05), 0.0), linear_color_stop(theme::CANVAS_BG, 0.5)))
                     .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                         this.toolbar.modifiers = ev.modifiers;
                         if this.drag.is_some() {

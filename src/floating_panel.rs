@@ -6,9 +6,11 @@
 //! own flat, border-only-when-focused window convention, deliberately
 //! not the original app's drop-shadow "SaaS card" look).
 
+use gpui::assets::IconName;
+use gpui::component::{Icon, Sizable};
 use gpui::{
-    App, ClickEvent, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point,
-    SharedString, Size, Styled, Window, div, prelude::*, px,
+    App, BoxShadow, ClickEvent, Hsla, IntoElement, MouseButton, MouseDownEvent, ParentElement,
+    Pixels, Point, SharedString, Size, Styled, Window, div, point, prelude::*, px,
 };
 
 use crate::theme;
@@ -24,16 +26,16 @@ pub enum PanelKind {
 impl PanelKind {
     pub const ALL: [PanelKind; 4] = [PanelKind::ChannelRack, PanelKind::PianoRoll, PanelKind::Playlist, PanelKind::Mixer];
 
-    /// A plain Unicode symbol, not a Nerd-Font-specific PUA glyph — safe
-    /// in any font (including a fallback if the exact Nerd Font variant
-    /// somehow isn't resolved), while still giving the toolbar/title bars
-    /// the icon-plus-label idiom waybar's own modules use.
-    pub fn glyph(self) -> &'static str {
+    /// A real vector icon (the bundled Lucide catalog — see
+    /// `gpui::assets::AllAssets` registered in `main.rs`) rather than a
+    /// Unicode-glyph stand-in, so the toolbar/title bars draw one
+    /// consistent icon family instead of a grab-bag of text approximations.
+    pub fn icon(self) -> IconName {
         match self {
-            PanelKind::ChannelRack => "▦",
-            PanelKind::PianoRoll => "♪",
-            PanelKind::Playlist => "☰",
-            PanelKind::Mixer => "▬",
+            PanelKind::ChannelRack => IconName::Grid2x2,
+            PanelKind::PianoRoll => IconName::Piano,
+            PanelKind::Playlist => IconName::ListMusic,
+            PanelKind::Mixer => IconName::SlidersVertical,
         }
     }
 
@@ -43,6 +45,21 @@ impl PanelKind {
             PanelKind::PianoRoll => "Piano Roll",
             PanelKind::Playlist => "Playlist",
             PanelKind::Mixer => "Mixer",
+        }
+    }
+
+    /// A fixed per-panel hue — not palette-switchable (like
+    /// `theme::pattern_color`, these identify *which thing this is*, not
+    /// *which theme is active*). Used for this panel's icon tint, its
+    /// focus ring/glow, and its row-2 toggle pill, so four panels read as
+    /// four distinct identities instead of one undifferentiated accent
+    /// color repeated four times.
+    pub fn identity_color(self) -> Hsla {
+        match self {
+            PanelKind::ChannelRack => Hsla { h: 255.0 / 360.0, s: 0.55, l: 0.70, a: 1.0 }, // indigo
+            PanelKind::PianoRoll => Hsla { h: 175.0 / 360.0, s: 0.50, l: 0.62, a: 1.0 }, // teal
+            PanelKind::Playlist => Hsla { h: 335.0 / 360.0, s: 0.60, l: 0.68, a: 1.0 }, // rose
+            PanelKind::Mixer => Hsla { h: 145.0 / 360.0, s: 0.40, l: 0.62, a: 1.0 }, // sage
         }
     }
 }
@@ -73,6 +90,32 @@ pub const MIN_PANEL_SIZE: Size<Pixels> = Size { width: px(280.0), height: px(160
 const TITLE_BAR_H: Pixels = px(26.0);
 const RESIZE_HANDLE_SIZE: Pixels = px(14.0);
 
+/// Allodium-tauri's own floating windows always carry a real two-layer
+/// drop shadow (`box-shadow: 0 16px 48px rgba(8,10,20,0.45)` — a tight
+/// contact shadow plus a wide ambient one), not the flat niri-style "only
+/// while dragging" treatment this rewrite used before. Ported as two
+/// `BoxShadow`s; `drag_boost` pushes both further out while the panel is
+/// being moved, instead of swapping in an unrelated single shadow.
+fn panel_shadow(drag_boost: bool) -> Vec<BoxShadow> {
+    let lift = if drag_boost { 1.6 } else { 1.0 };
+    vec![
+        BoxShadow {
+            color: theme::BG_APP.alpha(0.35),
+            offset: point(px(0.0), px(8.0 * lift)),
+            blur_radius: px(18.0 * lift),
+            spread_radius: px(0.0),
+            inset: false,
+        },
+        BoxShadow {
+            color: theme::BG_APP.alpha(0.5),
+            offset: point(px(0.0), px(22.0 * lift)),
+            blur_radius: px(52.0 * lift),
+            spread_radius: px(0.0),
+            inset: false,
+        },
+    ]
+}
+
 /// Wraps `body` in the shared panel chrome: a title bar (glyph + title +
 /// close button, draggable to move the panel) and a resize handle at the
 /// bottom-right corner. `on_focus` fires on a click anywhere in the panel
@@ -102,15 +145,23 @@ pub fn render_panel(
         .flex_col()
         .overflow_hidden()
         .rounded(theme::RADIUS_MD)
-        .bg(theme::BG_PANEL)
-        // A faint rest-state shadow — the thing that actually reads as
-        // "flat ImGUI chrome" wasn't the lack of a border, it was the
-        // total absence of any depth cue at rest. Kept deliberately
-        // faint (not the generic uniform "SaaS card" shadow) and still
-        // distinct from the heavier one that appears while dragging.
-        .shadow_xs()
-        .when(focused, |d| d.border(theme::FOCUS_RING_WIDTH).border_color(theme::FOCUS_RING))
-        .when(dragging_this, |d| d.shadow_lg())
+        .bg(theme::BG_PANEL.alpha(0.94))
+        .border_1()
+        .border_color(theme::BORDER)
+        .shadow(panel_shadow(dragging_this))
+        .when(focused, |d| {
+            let identity = kind.identity_color();
+            d.border_color(identity).shadow(
+                [panel_shadow(dragging_this), vec![BoxShadow {
+                    color: identity.alpha(0.25),
+                    offset: point(px(0.0), px(0.0)),
+                    blur_radius: px(16.0),
+                    spread_radius: px(0.0),
+                    inset: false,
+                }]]
+                .concat(),
+            )
+        })
         .on_any_mouse_down(on_focus)
         .child(
             div()
@@ -121,16 +172,18 @@ pub fn render_panel(
                 .items_center()
                 .gap_2()
                 .px_2()
-                .bg(theme::BG_PILL)
+                .bg(theme::HEADER_BG)
+                .border_b_1()
+                .border_color(theme::BORDER)
                 .cursor_default()
                 .on_mouse_down(MouseButton::Left, on_drag_start)
-                .child(div().text_size(px(11.0)).child(kind.glyph()))
+                .child(Icon::new(kind.icon()).small().text_color(kind.identity_color()))
                 .child(
                     div()
                         .flex_1()
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(theme::ACCENT_DIM)
+                        .text_size(px(12.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme::MAIN_TEXT)
                         .child(title.into()),
                 )
                 .child(
@@ -142,10 +195,10 @@ pub fn render_panel(
                         .items_center()
                         .justify_center()
                         .rounded(theme::RADIUS_XS)
-                        .text_color(theme::ACCENT_DIM)
+                        .text_color(theme::accent_dim())
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme::DESTRUCTIVE).text_color(theme::ACCENT_TEXT))
-                        .child("×")
+                        .hover(|s| s.bg(theme::destructive()).text_color(theme::accent_text()))
+                        .child(Icon::new(IconName::X).xsmall())
                         .on_click(on_close),
                 ),
         )
@@ -164,10 +217,9 @@ pub fn render_panel(
                 .px(px(2.0))
                 .pb(px(1.0))
                 .cursor_default()
-                .text_size(px(9.0))
-                .text_color(theme::ACCENT_DIM.alpha(0.35))
-                .hover(|s| s.text_color(theme::ACCENT_DIM))
-                .child("⋰")
+                .text_color(theme::accent_dim().alpha(0.35))
+                .hover(|s| s.text_color(theme::accent_dim()))
+                .child(Icon::new(IconName::ResizeCorner).xsmall())
                 .on_mouse_down(MouseButton::Left, on_resize_start),
         )
 }

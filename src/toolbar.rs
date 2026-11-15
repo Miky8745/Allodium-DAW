@@ -6,9 +6,23 @@
 //! - Transport (Pattern/Song switch, Play/Stop/Pause/Record, BPM, step
 //!   position), the four feature toggles, and the two monitor widgets
 //!   sit in row 1, right of the File/Edit/… menu.
-//! - The hover-info readout, panel toggles, Auto-scroll/one-click-record,
-//!   Snap/Pattern pickers, the MIDI LED, and the Shift/Alt/Ctrl badges
-//!   sit in row 2.
+//! - Panel toggles, Auto-scroll/one-click-record, Snap/Pattern pickers,
+//!   the MIDI LED, and the Shift/Alt/Ctrl badges sit in row 2.
+//!
+//! Visual pass: every control used to be an identically-sized, identically-
+//! weighted glyph square (ASCII/Unicode approximations of icons, no two
+//! quite the same optical weight) — the "flat ImGUI toolbox" look this
+//! redesign was asked to fix. This version draws real vector icons (the
+//! bundled Lucide catalog, via `gpui::assets::AllAssets` registered in
+//! `main.rs`) and gives the transport row actual hierarchy: Play is the one
+//! large, bordered, filled-when-active control; everything else is a small
+//! quiet icon toggle. Record is the one control that departs from the
+//! generic checked-state accent (it recolors to `theme::warm_accent()`,
+//! matching the mute/record "warm = destructive" convention in `theme.rs`)
+//! since `gpui::component::button::Toggle`'s own pressed style is hardcoded
+//! to the theme's cool accent — hand-styled rather than ported through that
+//! component for this one case. Row 2 sits on a darker fill than row 1, so
+//! it reads as the quieter, secondary strip it actually is.
 //!
 //! Wiring fidelity: anything this rewrite's audio engine already backs
 //! (play/stop, tempo, step position, Pattern/Song mode, pattern
@@ -21,16 +35,19 @@
 //! exist yet in this rewrite. Metronome goes one step further and ports
 //! the original's one real side effect (turning it on auto-starts
 //! playback). Only two controls have no faithful equivalent at all and
-//! stay inert, non-interactive chrome: the MIDI LED (no MIDI I/O
-//! anywhere in this codebase) and the Explorer panel toggle (no
-//! file-browser panel exists yet — MVP item #8, still unbuilt).
+//! stay inert, disabled chrome: the MIDI LED (no MIDI I/O anywhere in
+//! this codebase) and the Explorer panel toggle (no file-browser panel
+//! exists yet — MVP item #8, still unbuilt).
 
-use gpui::{
-    ClickEvent, Context, IntoElement, Modifiers, ParentElement, ScrollEvent, Styled, Window,
-    div, prelude::*, px,
-};
+use gpui::assets::IconName;
+use gpui::component::button::{Button, ButtonVariants, Toggle, ToggleGroup, ToggleVariants};
+use gpui::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui::component::separator::Separator;
+use gpui::component::{Disableable, Icon, Sizable, WindowExt};
+use gpui::{BoxShadow, Context, Hsla, IntoElement, Modifiers, ParentElement, ScrollEvent, Styled, Window, div, point, prelude::*, px};
 
 use crate::floating_panel::PanelKind;
+use crate::preferences;
 use crate::shell::AppShell;
 use crate::theme;
 
@@ -39,8 +56,7 @@ const MENU_LABELS: [&str; 6] = ["File", "Edit", "View", "Options", "Tools", "Hel
 pub struct ToolbarState {
     /// Name/value of the last-hovered toolbar control — mirrors the
     /// original's `hoverInfoStore`, scoped to this toolbar's own controls
-    /// rather than the whole app's Dial/Knob/Slider widgets (a full
-    /// app-wide retrofit is a much bigger, separate change). Stays
+    /// rather than the whole app's Dial/Knob/Slider widgets. Stays
     /// showing after the mouse moves off; blank until anything's been
     /// hovered at all.
     pub(crate) hover: Option<(&'static str, String)>,
@@ -74,34 +90,38 @@ impl Default for ToolbarState {
     }
 }
 
-/// A small pill: glyph/label, click toggles `active`, hover reports
-/// `(name, value)` into the info readout. Covers every toggle-shaped
-/// control in both rows (real or locally-stubbed alike).
+/// A small borderless icon toggle, checked state tinted with `color`
+/// rather than the generic theme accent — used for the feature-toggle
+/// cluster (`theme::secondary()`, a deliberately different hue from the
+/// amber transport row) so that whole group reads as its own role, not
+/// just a quieter copy of Play/Pause/Record. Covers every ordinary
+/// toggle-shaped control except Play/Stop/Pause/Record (their own
+/// bordered `transport_btn`).
 fn toggle(
     id: impl Into<gpui::ElementId>,
-    content: impl IntoElement,
+    icon: IconName,
     active: bool,
+    color: Hsla,
     name: &'static str,
     value: impl Into<String>,
-    on_click: impl Fn(&mut AppShell, &ClickEvent, &mut Window, &mut Context<AppShell>) + 'static,
+    on_click: impl Fn(&mut AppShell, &gpui::ClickEvent, &mut Window, &mut Context<AppShell>) + 'static,
     cx: &mut Context<AppShell>,
 ) -> impl IntoElement {
+    let id: gpui::ElementId = id.into();
     let value = value.into();
     div()
-        .id(id)
-        .w(px(30.0))
+        .id(id.clone())
+        .w(px(28.0))
         .h(px(26.0))
         .flex()
         .items_center()
         .justify_center()
         .rounded(theme::RADIUS_XS)
-        .text_size(px(11.0))
         .cursor_pointer()
-        .bg(if active { theme::BG_PILL_ACTIVE } else { theme::BG_PILL })
-        .text_color(if active { theme::ACCENT } else { theme::ACCENT_DIM })
-        .hover(|s| s.bg(theme::BG_PILL_HOVER))
-        .active(|s| s.bg(theme::BG_PILL_ACTIVE))
-        .child(content)
+        .text_color(if active { color } else { theme::BTN_TEXT })
+        .when(active, |d| d.bg(color.alpha(0.1)).shadow(glow(color)))
+        .hover(|s| if active { s } else { s.bg(theme::BTN_HOVER).text_color(theme::MAIN_TEXT) })
+        .child(Icon::new(icon).small())
         .on_click(cx.listener(on_click))
         .on_hover(cx.listener(move |shell, hovering: &bool, _, cx| {
             if *hovering {
@@ -111,37 +131,98 @@ fn toggle(
         }))
 }
 
-/// A non-interactive control with no backend to toggle at all (MIDI LED,
-/// the Explorer panel) — dim, no click handler, hover still reports its
-/// status honestly rather than implying it does something.
-fn inert(
+/// A soft colored glow for an active/filled control — a single wide,
+/// faint `BoxShadow`, the nearest GPUI equivalent to the mockup's
+/// `box-shadow: 0 0 Npx <color>` (GPUI has no backdrop-filter/blur, but
+/// an ordinary shadow with a large blur radius and no offset reads the
+/// same way: a soft halo, not a directional drop shadow).
+pub(crate) fn glow(color: Hsla) -> Vec<BoxShadow> {
+    vec![BoxShadow { color: color.alpha(0.35), offset: point(px(0.0), px(0.0)), blur_radius: px(10.0), spread_radius: px(0.0), inset: false }]
+}
+
+/// One of the four uniform bordered transport buttons (Play/Stop/Pause/
+/// Record) — Allodium-tauri's own `.tb-xp` treatment: a bordered square,
+/// neutral at rest, accent-bordered-and-glowing while active. `color` is
+/// the active-state accent (`theme::accent()` for Play/Pause,
+/// `theme::warm_accent()` for Record so recording reads as categorically
+/// different from an ordinary engaged toggle); Stop has no active state
+/// at all, so its caller just passes `active: false`.
+fn transport_btn(
     id: impl Into<gpui::ElementId>,
-    content: impl IntoElement,
+    icon: IconName,
+    active: bool,
+    color: Hsla,
     name: &'static str,
-    note: &'static str,
+    value: impl Into<String>,
+    on_click: impl Fn(&mut AppShell, &gpui::ClickEvent, &mut Window, &mut Context<AppShell>) + 'static,
     cx: &mut Context<AppShell>,
 ) -> impl IntoElement {
+    let id: gpui::ElementId = id.into();
+    let value = value.into();
     div()
-        .id(id)
-        .w(px(30.0))
-        .h(px(26.0))
+        .id(id.clone())
+        .w(px(34.0))
+        .h(px(34.0))
         .flex()
         .items_center()
         .justify_center()
-        .rounded(theme::RADIUS_XS)
-        .text_size(px(11.0))
-        .text_color(theme::ACCENT_DIM.alpha(0.5))
-        .child(content)
+        .rounded(theme::RADIUS_SM)
+        .border_1()
+        .cursor_pointer()
+        .bg(if active { color.alpha(0.09) } else { theme::BTN_BG })
+        .border_color(if active { color } else { theme::BTN_BORDER })
+        .text_color(if active { color } else { theme::BTN_TEXT })
+        .when(active, |d| d.shadow(glow(color)))
+        .hover(|s| if active { s } else { s.bg(theme::BTN_HOVER).text_color(theme::MAIN_TEXT) })
+        .child(Icon::new(icon).small())
+        .on_click(cx.listener(on_click))
+        .on_hover(cx.listener(move |shell, hovering: &bool, _, cx| {
+            if *hovering {
+                shell.toolbar.hover = Some((name, value.clone()));
+                cx.notify();
+            }
+        }))
+}
+
+/// A disabled toggle with no backend at all (MIDI LED, the Explorer
+/// panel) — its hover-info note says so honestly rather than implying
+/// it works.
+fn inert(id: impl Into<gpui::ElementId>, icon: IconName, name: &'static str, note: &'static str, cx: &mut Context<AppShell>) -> impl IntoElement {
+    let id: gpui::ElementId = id.into();
+    div()
+        .id(id.clone())
         .on_hover(cx.listener(move |shell, hovering: &bool, _, cx| {
             if *hovering {
                 shell.toolbar.hover = Some((name, note.to_string()));
                 cx.notify();
             }
         }))
+        .child(Toggle::new(id).w(px(28.0)).h(px(26.0)).disabled(true).child(Icon::new(icon).small()))
 }
 
 fn vsep() -> impl IntoElement {
-    div().w(px(1.0)).h(px(22.0)).mx_2().bg(theme::BORDER)
+    Separator::vertical().h(px(22.0)).w(px(1.0)).mx_2()
+}
+
+/// The one real menu in the File/Edit/View/… row — a dropdown with a
+/// single "Preferences…" item that opens the in-app Preferences dialog
+/// (`src/preferences.rs`). The rest of the row stays inert text (no
+/// backend behind them yet), so only this one label gets the quiet
+/// ghost-button treatment that makes it look (and act) clickable.
+fn edit_menu(prefs: gpui::Entity<preferences::Preferences>) -> impl IntoElement {
+    Button::new("menu-edit")
+        .ghost()
+        .compact()
+        .text_size(px(11.0))
+        .text_color(theme::accent_dim().alpha(0.7))
+        .label("Edit")
+        .dropdown_menu(move |menu, _, _| {
+            let prefs = prefs.clone();
+            menu.item(PopupMenuItem::new("Preferences…").icon(IconName::Settings).on_click(move |_, window, cx| {
+                let prefs = prefs.clone();
+                window.open_dialog(cx, move |dialog, _, cx| dialog.title("Preferences").w(px(520.0)).child(preferences::render(&prefs, cx)));
+            }))
+        })
 }
 
 impl AppShell {
@@ -184,12 +265,13 @@ impl AppShell {
             .unwrap_or_else(|| "—".to_string());
         let modifiers = self.toolbar.modifiers;
         let hover = self.toolbar.hover.clone();
+        let snap_quarter = self.toolbar.snap_quarter;
 
         div()
             .w_full()
             .flex()
             .flex_col()
-            .bg(theme::BG_PANEL)
+            .bg(theme::BG_APP)
             .border_b_1()
             .border_color(theme::BORDER)
             .child(
@@ -199,99 +281,86 @@ impl AppShell {
                     .w_full()
                     .flex()
                     .items_center()
-                    .px_3()
                     .child(
+                        // The one column with its own fill (Allodium-tauri's
+                        // `.tb-menu`) — everything to its right sits directly
+                        // on the toolbar's own `BG_APP`, no separate panel fill.
                         div()
+                            .h_full()
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(
-                                div()
-                                    .text_size(px(13.0))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(theme::ACCENT)
-                                    .child("Allodium"),
-                            )
-                            .child({
-                                let mut menu = div().flex().items_center().gap_1();
-                                for label in MENU_LABELS {
-                                    menu = menu.child(
-                                        div()
-                                            .px_2()
-                                            .py_1()
-                                            .rounded(theme::RADIUS_SM)
-                                            .text_size(px(11.0))
-                                            .text_color(theme::ACCENT_DIM)
-                                            .child(label),
-                                    );
-                                }
-                                menu
-                            }),
-                    )
-                    .child(vsep())
-                    .child(
-                        // Pattern / Song mode switch.
-                        div()
-                            .id("patsng")
-                            .flex()
-                            .rounded(theme::RADIUS_SM)
-                            .border_1()
+                            .px_3()
+                            .bg(theme::SLATE)
+                            .border_r_1()
                             .border_color(theme::BORDER)
-                            .overflow_hidden()
-                            .cursor_pointer()
                             .child(
                                 div()
-                                    .px_2()
-                                    .py_1()
-                                    .text_size(px(10.0))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .bg(if !song_mode { theme::ACCENT } else { theme::BG_PILL })
-                                    .text_color(if !song_mode { theme::ACCENT_TEXT } else { theme::ACCENT_DIM })
-                                    .when(song_mode, |d| d.hover(|s| s.bg(theme::BG_PILL_HOVER)))
-                                    .child("PAT"),
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(Icon::new(IconName::AudioLines).small().text_color(theme::accent()))
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(theme::accent())
+                                            .child("Allodium"),
+                                    ),
                             )
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_1()
-                                    .text_size(px(10.0))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .bg(if song_mode { theme::ACCENT } else { theme::BG_PILL })
-                                    .text_color(if song_mode { theme::ACCENT_TEXT } else { theme::ACCENT_DIM })
-                                    .when(!song_mode, |d| d.hover(|s| s.bg(theme::BG_PILL_HOVER)))
-                                    .child("SONG"),
-                            )
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.channel_rack.update(cx, |cr, cx| cr.toggle_song_mode(cx));
-                            }))
-                            .on_hover(cx.listener(move |shell, hovering: &bool, _, cx| {
-                                if *hovering {
-                                    shell.toolbar.hover =
-                                        Some(("Pattern/Song mode", if song_mode { "Song" } else { "Pattern" }.to_string()));
-                                    cx.notify();
+                            .children(MENU_LABELS.map(|label| {
+                                if label == "Edit" {
+                                    edit_menu(self.preferences.clone()).into_any_element()
+                                } else {
+                                    div().text_size(px(11.0)).text_color(theme::BTN_TEXT).child(label).into_any_element()
                                 }
                             })),
                     )
                     .child(vsep())
                     .child(
-                        // Transport: Play · Stop · Pause · Record.
+                        // Pattern / Song mode — one segmented control, not two
+                        // separately-boxed pills: the design guide's rule that
+                        // a segmented control shares one silhouette.
+                        ToggleGroup::new("mode")
+                            .outline()
+                            .segmented()
+                            .single()
+                            .small()
+                            .child(Toggle::new("mode-pat").label("PAT").checked(!song_mode))
+                            .child(Toggle::new("mode-song").label("SONG").checked(song_mode))
+                            .on_click(cx.listener(|this, checks: &Vec<bool>, _, cx| {
+                                let want_song = checks.get(1).copied().unwrap_or(false);
+                                if want_song != this.channel_rack.read(cx).is_song_mode() {
+                                    this.channel_rack.update(cx, |cr, cx| cr.toggle_song_mode(cx));
+                                }
+                            })),
+                    )
+                    .child(vsep())
+                    .child(
+                        // Transport: Play · Stop · Pause · Record — four
+                        // uniform bordered squares (Allodium-tauri's `.tb-xp`),
+                        // not a hierarchy of one big button and three small
+                        // ones. Record alone recolors to the warm accent
+                        // instead of the cool one while active.
                         div()
                             .flex()
                             .items_center()
-                            .gap_1()
-                            .child(toggle(
+                            .gap(px(3.0))
+                            .child(transport_btn(
                                 "transport-play",
-                                if playing { "■" } else { "▶" },
+                                IconName::Play,
                                 playing,
+                                theme::accent(),
                                 "Play",
                                 if playing { "Playing" } else { "Stopped" },
                                 |this, _, _, cx| this.channel_rack.update(cx, |cr, cx| cr.toggle_play(cx)),
                                 cx,
                             ))
-                            .child(toggle(
+                            .child(transport_btn(
                                 "transport-stop",
-                                "■",
+                                IconName::Square,
                                 false,
+                                theme::accent(),
                                 "Stop",
                                 "",
                                 |this, _, _, cx| {
@@ -302,19 +371,21 @@ impl AppShell {
                                 },
                                 cx,
                             ))
-                            .child(toggle(
+                            .child(transport_btn(
                                 "transport-pause",
-                                "❙❙",
+                                IconName::Pause,
                                 self.toolbar.paused,
+                                theme::accent(),
                                 "Pause",
                                 if self.toolbar.paused { "Paused" } else { "Not paused" },
                                 |this, _, _, cx| this.toggle_pause(cx),
                                 cx,
                             ))
-                            .child(toggle(
+                            .child(transport_btn(
                                 "transport-record",
-                                "●",
+                                IconName::CircleDot,
                                 self.toolbar.recording,
+                                theme::warm_accent(),
                                 "Record",
                                 if self.toolbar.recording { "Recording" } else { "Idle" },
                                 |this, _, _, cx| {
@@ -334,16 +405,17 @@ impl AppShell {
                             .flex_col()
                             .items_center()
                             .px_2()
+                            .py_0p5()
                             .rounded(theme::RADIUS_SM)
-                            .bg(theme::BG_PILL)
+                            .bg(theme::SLATE)
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme::BG_PILL_HOVER))
-                            .child(div().text_size(px(8.5)).text_color(theme::ACCENT_DIM).child("BPM"))
+                            .hover(|s| s.bg(theme::BTN_HOVER))
+                            .child(div().text_size(px(8.5)).text_color(theme::accent_dim()).child("BPM"))
                             .child(
                                 div()
                                     .text_size(px(14.0))
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(theme::ACCENT)
+                                    .text_color(theme::accent())
                                     .child(format!("{tempo:.1}")),
                             )
                             .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, cx| {
@@ -372,14 +444,15 @@ impl AppShell {
                             .flex_col()
                             .items_center()
                             .px_2()
+                            .py_0p5()
                             .rounded(theme::RADIUS_SM)
-                            .bg(theme::BG_PILL)
-                            .child(div().text_size(px(8.5)).text_color(theme::ACCENT_DIM).child("STEP"))
+                            .bg(theme::SLATE)
+                            .child(div().text_size(px(8.5)).text_color(theme::accent_dim()).child("STEP"))
                             .child(
                                 div()
                                     .text_size(px(14.0))
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(theme::ACCENT)
+                                    .text_color(theme::accent())
                                     .child(format!("{step:.0}")),
                             )
                             .on_hover(cx.listener(move |shell, hovering: &bool, _, cx| {
@@ -398,8 +471,9 @@ impl AppShell {
                             .gap_1()
                             .child(toggle(
                                 "feat-typing",
-                                "⌨",
+                                IconName::Keyboard,
                                 self.toolbar.typing_keyboard,
+                                theme::secondary(),
                                 "Typing keyboard to piano",
                                 if self.toolbar.typing_keyboard { "On" } else { "Off" },
                                 |this, _, _, cx| {
@@ -410,8 +484,9 @@ impl AppShell {
                             ))
                             .child(toggle(
                                 "feat-precount",
-                                "321",
+                                IconName::Timer,
                                 self.toolbar.precount,
+                                theme::secondary(),
                                 "Recording precount",
                                 if self.toolbar.precount { "On" } else { "Off" },
                                 |this, _, _, cx| {
@@ -422,8 +497,9 @@ impl AppShell {
                             ))
                             .child(toggle(
                                 "feat-looprec",
-                                "↻",
+                                IconName::Repeat,
                                 self.toolbar.loop_record,
+                                theme::secondary(),
                                 "Loop recording",
                                 if self.toolbar.loop_record { "On" } else { "Off" },
                                 |this, _, _, cx| {
@@ -434,8 +510,9 @@ impl AppShell {
                             ))
                             .child(toggle(
                                 "feat-metronome",
-                                "△",
+                                IconName::Triangle,
                                 self.toolbar.metronome,
+                                theme::secondary(),
                                 "Metronome",
                                 if self.toolbar.metronome { "On" } else { "Off" },
                                 |this, _, _, cx| this.toggle_metronome(cx),
@@ -445,18 +522,13 @@ impl AppShell {
                     .child(vsep())
                     .child(inert(
                         "monitor-scope",
-                        "◌",
+                        IconName::AudioLines,
                         "Audio monitor",
                         "Oscilloscope/spectrum — no metering engine hook yet",
                         cx,
                     ))
-                    .child(inert(
-                        "monitor-peak",
-                        "▮▮",
-                        "Peak meter",
-                        "No metering engine hook yet",
-                        cx,
-                    )),
+                    .child(inert("monitor-peak", IconName::Gauge, "Peak meter", "No metering engine hook yet", cx))
+                    .child(div().pr_2()),
             )
             .child(
                 // ── Row 2: hover info, panel toggles, snap/pattern, MIDI, keys ──
@@ -478,24 +550,18 @@ impl AppShell {
                             .child(
                                 div()
                                     .text_size(px(10.0))
-                                    .text_color(theme::ACCENT_DIM)
+                                    .text_color(theme::accent_dim())
                                     .child(hover.as_ref().map(|(name, _)| name.to_string()).unwrap_or_default()),
                             )
                             .child(
                                 div()
                                     .text_size(px(10.0))
-                                    .text_color(theme::ACCENT_DIM.alpha(0.6))
+                                    .text_color(theme::accent_dim().alpha(0.6))
                                     .child(hover.map(|(_, value)| value).unwrap_or_default()),
                             ),
                     )
                     .child(vsep())
-                    .child(inert(
-                        "panel-explorer",
-                        "▢",
-                        "File Explorer",
-                        "Not built yet — MVP item #8",
-                        cx,
-                    ))
+                    .child(inert("panel-explorer", IconName::FolderOpen, "File Explorer", "Not built yet — MVP item #8", cx))
                     .child({
                         let mut pills = div().flex().gap_1();
                         for kind in PanelKind::ALL {
@@ -506,8 +572,9 @@ impl AppShell {
                     .child(vsep())
                     .child(toggle(
                         "row2-autoscroll",
-                        "⇒",
+                        IconName::ChevronsRight,
                         self.toolbar.auto_scroll,
+                        theme::secondary(),
                         "Auto scroll",
                         if self.toolbar.auto_scroll { "On" } else { "Off" },
                         |this, _, _, cx| {
@@ -518,8 +585,9 @@ impl AppShell {
                     ))
                     .child(toggle(
                         "row2-oneclickrec",
-                        "MIC",
+                        IconName::Mic,
                         self.toolbar.one_click_record,
+                        theme::secondary(),
                         "One-click audio recording",
                         if self.toolbar.one_click_record { "On" } else { "Off" },
                         |this, _, _, cx| {
@@ -529,36 +597,54 @@ impl AppShell {
                         cx,
                     ))
                     .child(vsep())
-                    .child(toggle(
-                        "row2-snap",
-                        if self.toolbar.snap_quarter { "1/4" } else { "1/2" },
-                        false,
-                        "Snapping",
-                        if self.toolbar.snap_quarter { "1/4" } else { "1/2" },
-                        |this, _, _, cx| {
-                            this.toolbar.snap_quarter = !this.toolbar.snap_quarter;
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(toggle(
-                        "row2-pattern",
-                        pattern_label.clone(),
-                        false,
-                        "Pattern",
-                        pattern_label,
-                        move |this, _, _, cx| {
-                            if patterns.is_empty() {
-                                return;
-                            }
-                            let pos = patterns.iter().position(|(id, _)| *id == selected_pattern_id).unwrap_or(0);
-                            let next_id = patterns[(pos + 1) % patterns.len()].0;
-                            this.channel_rack.update(cx, |cr, cx| cr.select_pattern(next_id, cx));
-                        },
-                        cx,
-                    ))
+                    .child(
+                        ToggleGroup::new("snap")
+                            .outline()
+                            .segmented()
+                            .single()
+                            .small()
+                            .child(Toggle::new("snap-1-4").label("1/4").checked(snap_quarter))
+                            .child(Toggle::new("snap-1-2").label("1/2").checked(!snap_quarter))
+                            .on_click(cx.listener(|this, checks: &Vec<bool>, _, cx| {
+                                this.toolbar.snap_quarter = checks.first().copied().unwrap_or(true);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("row2-pattern")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .h(px(26.0))
+                            .rounded(theme::RADIUS_SM)
+                            .border_1()
+                            .border_color(theme::BTN_BORDER)
+                            .bg(theme::BTN_BG)
+                            .text_size(px(11.0))
+                            .text_color(theme::BTN_TEXT)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::BTN_HOVER).text_color(theme::MAIN_TEXT))
+                            .child(Icon::new(IconName::ListMusic).small())
+                            .child(pattern_label.clone())
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                if patterns.is_empty() {
+                                    return;
+                                }
+                                let pos = patterns.iter().position(|(id, _)| *id == selected_pattern_id).unwrap_or(0);
+                                let next_id = patterns[(pos + 1) % patterns.len()].0;
+                                this.channel_rack.update(cx, |cr, cx| cr.select_pattern(next_id, cx));
+                            }))
+                            .on_hover(cx.listener(move |shell, hovering: &bool, _, cx| {
+                                if *hovering {
+                                    shell.toolbar.hover = Some(("Pattern", pattern_label.clone()));
+                                    cx.notify();
+                                }
+                            })),
+                    )
                     .child(div().flex_1())
-                    .child(inert("midi-led", "●", "MIDI", "No MIDI I/O in this rewrite", cx))
+                    .child(inert("midi-led", IconName::Radio, "MIDI", "No MIDI I/O in this rewrite", cx))
                     .child(vsep())
                     .child(
                         div()
@@ -577,9 +663,11 @@ fn key_badge(label: &'static str, held: bool) -> impl IntoElement {
         .px_2()
         .py_1()
         .rounded(theme::RADIUS_SM)
+        .border_1()
         .text_size(px(9.0))
         .font_weight(gpui::FontWeight::BOLD)
-        .bg(if held { theme::BG_PILL_ACTIVE } else { theme::BG_PILL })
-        .text_color(if held { theme::ACCENT } else { theme::ACCENT_DIM.alpha(0.4) })
+        .bg(if held { theme::accent().alpha(0.14) } else { theme::BTN_BG })
+        .border_color(if held { theme::accent() } else { theme::BTN_BORDER })
+        .text_color(if held { theme::accent() } else { theme::BTN_TEXT.alpha(0.5) })
         .child(label)
 }

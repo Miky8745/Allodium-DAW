@@ -266,7 +266,7 @@ impl Render for Playlist {
                     .items_center()
                     .justify_center()
                     .text_size(px(10.0))
-                    .text_color(theme::ACCENT_DIM)
+                    .text_color(theme::accent_dim())
                     .border_b_1()
                     .border_color(theme::BORDER)
                     .child(format!("Track {}", i + 1)),
@@ -293,7 +293,7 @@ impl Render for Playlist {
                     .px_1()
                     .overflow_hidden()
                     .text_size(px(10.0))
-                    .text_color(theme::ACCENT_TEXT)
+                    .text_color(theme::accent_text())
                     .child(name.clone()),
             );
         }
@@ -303,7 +303,7 @@ impl Render for Playlist {
             let top = placement.track_id as f32 * ROW_H - scroll_y;
             let width = (length as f32 * BEAT_W - 2.0).max(1.0);
             let alpha = (1.0 - progress).max(0.0);
-            let mut dying_color = theme::WARM_ACCENT;
+            let mut dying_color = theme::warm_accent();
             dying_color.a = alpha;
             block_layer = block_layer.child(
                 div()
@@ -319,7 +319,7 @@ impl Render for Playlist {
                     .px_1()
                     .overflow_hidden()
                     .text_size(px(10.0))
-                    .text_color(theme::ACCENT_TEXT)
+                    .text_color(theme::accent_text())
                     .child(name.clone()),
             );
         }
@@ -338,7 +338,7 @@ impl Render for Playlist {
                     .items_center()
                     .text_size(px(10.0))
                     .bg(if is_selected { theme::pattern_color(id) } else { theme::BG_PILL })
-                    .text_color(if is_selected { theme::ACCENT_TEXT } else { theme::ACCENT_DIM })
+                    .text_color(if is_selected { theme::accent_text() } else { theme::accent_dim() })
                     .cursor_pointer()
                     .when(!is_selected, |d| d.hover(|s| s.bg(theme::BG_PILL_HOVER)))
                     .child(name.clone())
@@ -381,7 +381,7 @@ impl Render for Playlist {
                     .bg(theme::BG_PANEL)
                     .border_b_1()
                     .border_color(theme::BORDER)
-                    .text_color(theme::ACCENT_DIM)
+                    .text_color(theme::accent_dim())
                     .child(pattern_bar),
             )
             .child(

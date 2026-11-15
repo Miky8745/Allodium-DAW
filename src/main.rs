@@ -5,6 +5,7 @@ mod mixer;
 mod perf;
 mod piano_roll;
 mod playlist;
+mod preferences;
 mod project;
 mod shell;
 mod theme;
@@ -27,11 +28,31 @@ fn main() {
         }
     };
 
-    gpui::application().run(|cx: &mut App| {
+    // The full Lucide catalog, not just gpui-component's own ~100-icon
+    // default bundle — the toolbar/panel-chrome redesign below draws names
+    // (piano, list-music, sliders-vertical, circle-dot, …) outside that
+    // smaller set.
+    gpui::application().with_assets(gpui::assets::AllAssets).run(|cx: &mut App| {
         // Initializes gpui-component (and the gpui-base layer it sits on) —
         // required once, before any window that uses a styled component.
         // See `docs/stage-10-gpui-component.md`.
         gpui::init(cx);
+
+        // gpui-component's default theme is light; switch to dark first
+        // (its own dark palette — near-black backgrounds, neutral grays —
+        // sits close enough to this app's own dark tones not to clash).
+        // Then override just the handful of semantic slots this app's own
+        // widgets will actually route through — primary/accent for
+        // selected-or-active controls, danger for destructive ones,
+        // background/border/radius for visual continuity with the hand-
+        // styled containers — rather than reskinning all ~150 tokens the
+        // library exposes. See `docs/stage-10-gpui-component.md`.
+        gpui::component::Theme::change(gpui::component::ThemeMode::Dark, None, cx);
+        // Pushes the default palette's colors into the handful of
+        // gpui-component tokens this app's widgets route through. Preferences
+        // → Theme calls the same function again at runtime to switch palettes
+        // live — see `theme::apply_palette`.
+        theme::apply_palette(cx, theme::default_palette());
 
         let bounds = Bounds::centered(None, size(px(1400.0), px(900.0)), cx);
         let window = cx

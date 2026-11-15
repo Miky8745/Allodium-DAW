@@ -413,7 +413,7 @@ fn paint_grid(
     // Dying notes: a brief flash that fades and shrinks slightly.
     for (note, progress) in dying {
         let alpha = (1.0 - progress).max(0.0);
-        let mut color = theme::WARM_ACCENT;
+        let mut color = theme::warm_accent();
         color.a = alpha;
         paint_note(window, origin, scroll_x, scroll_y, note, color, alpha);
     }

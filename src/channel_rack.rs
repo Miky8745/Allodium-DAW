@@ -506,7 +506,7 @@ fn slider(label: &'static str, value: f64, channel_id: u32, kind: SliderKind, cx
         .flex()
         .items_center()
         .gap_1()
-        .child(div().text_color(theme::ACCENT_DIM).text_size(px(10.0)).child(label))
+        .child(div().text_color(theme::accent_dim()).text_size(px(10.0)).child(label))
         .child(
             div()
                 .w(px(SLIDER_W))
@@ -514,7 +514,7 @@ fn slider(label: &'static str, value: f64, channel_id: u32, kind: SliderKind, cx
                 .rounded(px(5.0))
                 .bg(theme::BG_PANEL)
                 .relative()
-                .child(div().absolute().left_0().top_0().h_full().w(px(fill_w)).rounded(px(5.0)).bg(theme::ACCENT))
+                .child(div().absolute().left_0().top_0().h_full().w(px(fill_w)).rounded(px(5.0)).bg(theme::accent()))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, ev: &gpui::MouseDownEvent, _, _| {
@@ -555,7 +555,7 @@ impl Render for ChannelRack {
                 // one system, not two unrelated ones.
                 let in_even_group = (i / 4) % 2 == 0;
                 let bg = match (*on, in_even_group) {
-                    (true, _) => theme::ACCENT,
+                    (true, _) => theme::accent(),
                     (false, true) => theme::BG_PANEL,
                     (false, false) => theme::BG_PILL,
                 };
@@ -566,7 +566,7 @@ impl Render for ChannelRack {
                         .h(px(20.0))
                         .rounded(theme::RADIUS_XS)
                         .bg(bg)
-                        .when(is_current, |d| d.border_2().border_color(theme::ACCENT_TEXT))
+                        .when(is_current, |d| d.border_2().border_color(theme::accent_text()))
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.toggle_step(id, i, cx);
@@ -584,7 +584,7 @@ impl Render for ChannelRack {
                 .p_2()
                 .rounded(theme::RADIUS_SM)
                 .bg(theme::BG_PILL)
-                .when(is_selected, |d| d.border_1().border_color(theme::ACCENT))
+                .when(is_selected, |d| d.border_1().border_color(theme::accent()))
                 .child(
                     div()
                         .id(("name", id as usize))
@@ -606,7 +606,7 @@ impl Render for ChannelRack {
                         .items_center()
                         .justify_center()
                         .text_size(px(10.0))
-                        .bg(if ch.muted { theme::DESTRUCTIVE } else { theme::BG_PANEL })
+                        .bg(if ch.muted { theme::destructive() } else { theme::BG_PANEL })
                         .cursor_pointer()
                         .hover(|s| if ch.muted { s } else { s.bg(theme::BG_PILL_HOVER) })
                         .child("M")
@@ -622,7 +622,7 @@ impl Render for ChannelRack {
                         .items_center()
                         .justify_center()
                         .text_size(px(10.0))
-                        .bg(if ch.soloed { theme::ACCENT } else { theme::BG_PANEL })
+                        .bg(if ch.soloed { theme::accent() } else { theme::BG_PANEL })
                         .cursor_pointer()
                         .hover(|s| if ch.soloed { s } else { s.bg(theme::BG_PILL_HOVER) })
                         .child("S")
@@ -639,7 +639,7 @@ impl Render for ChannelRack {
                         .justify_center()
                         .text_size(px(9.0))
                         .bg(theme::BG_PANEL)
-                        .text_color(theme::ACCENT_DIM)
+                        .text_color(theme::accent_dim())
                         .cursor_pointer()
                         .hover(|s| s.bg(theme::BG_PILL_HOVER))
                         .child(if ch.mixer_track == 0 { "Mstr".to_string() } else { format!("Trk {}", ch.mixer_track) })
@@ -657,9 +657,9 @@ impl Render for ChannelRack {
                         .items_center()
                         .justify_center()
                         .rounded(theme::RADIUS_XS)
-                        .text_color(theme::DESTRUCTIVE)
+                        .text_color(theme::destructive())
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme::DESTRUCTIVE.alpha(0.15)))
+                        .hover(|s| s.bg(theme::destructive().alpha(0.15)))
                         .child("×")
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.remove_channel(id, cx))),
                 );
@@ -682,9 +682,9 @@ impl Render for ChannelRack {
                     .items_center()
                     .justify_center()
                     .gap_1()
-                    .bg(if playing { theme::ACCENT } else { theme::BG_PILL })
+                    .bg(if playing { theme::accent() } else { theme::BG_PILL })
                     .cursor_pointer()
-                    .hover(|s| if playing { s.bg(theme::ACCENT_HOVER) } else { s.bg(theme::BG_PILL_HOVER) })
+                    .hover(|s| if playing { s.bg(theme::accent_hover()) } else { s.bg(theme::BG_PILL_HOVER) })
                     .active(|s| s.bg(theme::BG_PILL_ACTIVE))
                     .child(if playing { "■" } else { "▶" })
                     .child(if playing { "Stop" } else { "Play" })
@@ -700,9 +700,9 @@ impl Render for ChannelRack {
                     .items_center()
                     .justify_center()
                     .text_size(px(11.0))
-                    .bg(if song_mode { theme::ACCENT } else { theme::BG_PILL })
+                    .bg(if song_mode { theme::accent() } else { theme::BG_PILL })
                     .cursor_pointer()
-                    .hover(|s| if song_mode { s.bg(theme::ACCENT_HOVER) } else { s.bg(theme::BG_PILL_HOVER) })
+                    .hover(|s| if song_mode { s.bg(theme::accent_hover()) } else { s.bg(theme::BG_PILL_HOVER) })
                     .active(|s| s.bg(theme::BG_PILL_ACTIVE))
                     .child(if song_mode { "Song" } else { "Pat" })
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_song_mode(cx))),

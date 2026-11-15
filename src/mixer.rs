@@ -101,7 +101,7 @@ fn fader(value: f64, kind: FaderKind, height: gpui::Pixels, cx: &Context<Mixer>)
         .rounded(px(4.0))
         .bg(theme::BG_PANEL)
         .relative()
-        .child(div().absolute().left_0().bottom_0().w_full().h(px(fill_h)).rounded(px(4.0)).bg(theme::ACCENT))
+        .child(div().absolute().left_0().bottom_0().w_full().h(px(fill_h)).rounded(px(4.0)).bg(theme::accent()))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.begin_drag(kind, f32::from(ev.position.y), cx)),
@@ -116,7 +116,7 @@ fn pan_dot(pan: f64, track_id: u32, cx: &Context<Mixer>) -> impl IntoElement {
         .rounded(px(7.0))
         .bg(theme::BG_PANEL)
         .relative()
-        .child(div().absolute().left(px(left)).top(px(2.0)).w(px(10.0)).h(px(10.0)).rounded(px(5.0)).bg(theme::ACCENT_DIM))
+        .child(div().absolute().left(px(left)).top(px(2.0)).w(px(10.0)).h(px(10.0)).rounded(px(5.0)).bg(theme::accent_dim()))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
@@ -143,7 +143,7 @@ impl Render for Mixer {
                 .p_2()
                 .rounded(theme::RADIUS_SM)
                 .bg(theme::BG_PILL)
-                .child(div().text_size(px(11.0)).text_color(theme::ACCENT).child("Master"))
+                .child(div().text_size(px(11.0)).text_color(theme::accent()).child("Master"))
                 .child(fader(master_volume, FaderKind::MasterVolume, self.fader_height, cx)),
         );
 
@@ -165,14 +165,14 @@ impl Render for Mixer {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .child(div().text_size(px(11.0)).text_color(theme::ACCENT_DIM).child(format!("Trk {id}")))
+                            .child(div().text_size(px(11.0)).text_color(theme::accent_dim()).child(format!("Trk {id}")))
                             .child(
                                 div()
                                     .id(("remove-track", id as usize))
                                     .rounded(theme::RADIUS_XS)
-                                    .text_color(theme::DESTRUCTIVE)
+                                    .text_color(theme::destructive())
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(theme::DESTRUCTIVE.alpha(0.15)))
+                                    .hover(|s| s.bg(theme::destructive().alpha(0.15)))
                                     .child("×")
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         this.channel_rack.update(cx, |rack, cx| rack.remove_mixer_track(id, cx));
@@ -195,7 +195,7 @@ impl Render for Mixer {
                                     .items_center()
                                     .justify_center()
                                     .text_size(px(10.0))
-                                    .bg(if t.muted { theme::DESTRUCTIVE } else { theme::BG_PANEL })
+                                    .bg(if t.muted { theme::destructive() } else { theme::BG_PANEL })
                                     .cursor_pointer()
                                     .hover(|s| if t.muted { s } else { s.bg(theme::BG_PILL_HOVER) })
                                     .child("M")
@@ -213,7 +213,7 @@ impl Render for Mixer {
                                     .items_center()
                                     .justify_center()
                                     .text_size(px(10.0))
-                                    .bg(if t.soloed { theme::ACCENT } else { theme::BG_PANEL })
+                                    .bg(if t.soloed { theme::accent() } else { theme::BG_PANEL })
                                     .cursor_pointer()
                                     .hover(|s| if t.soloed { s } else { s.bg(theme::BG_PILL_HOVER) })
                                     .child("S")
@@ -250,7 +250,7 @@ impl Render for Mixer {
             .overflow_hidden()
             .bg(theme::BG_APP)
             .font_family(theme::FONT_UI)
-            .text_color(theme::ACCENT_DIM)
+            .text_color(theme::accent_dim())
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 if this.drag.is_some() {
                     let y = f32::from(ev.position.y);
