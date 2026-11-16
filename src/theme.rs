@@ -249,6 +249,19 @@ pub fn secondary_text() -> Hsla {
 pub const METER_GREEN: Hsla = Hsla { h: 120.0 / 360.0, s: 0.6, l: 0.45, a: 1.0 };
 pub const METER_YELLOW: Hsla = Hsla { h: 50.0 / 360.0, s: 0.85, l: 0.55, a: 1.0 };
 
+// Piano Roll. Notes themselves use `accent()`, so they recolor with the
+// active palette, unlike Allodium-tauri's fixed per-note color palette
+// (no per-note color field exists here, see `piano_roll.rs`'s own notes
+// on scope); these are just the canvas/key neutrals that have no
+// equivalent semantic token above.
+pub const PIANO_GRID_BG: Hsla = Hsla { h: 0.0, s: 0.0, l: 0.102, a: 1.0 };
+pub const PIANO_BEAT_BAND: Hsla = Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.03 };
+pub const PIANO_BLACK_ROW_TINT: Hsla = Hsla { h: 0.0, s: 0.0, l: 0.0, a: 0.25 };
+pub const PIANO_PLAYHEAD: Hsla = Hsla { h: 0.0, s: 0.8, l: 0.6, a: 0.9 };
+pub const PIANO_KEY_WHITE: Hsla = Hsla { h: 0.0, s: 0.0, l: 0.71, a: 1.0 };
+pub const PIANO_KEY_C: Hsla = Hsla { h: 0.0, s: 0.0, l: 0.62, a: 1.0 };
+pub const PIANO_KEY_BLACK: Hsla = Hsla { h: 0.0, s: 0.0, l: 0.22, a: 1.0 };
+
 // Borders / chrome.
 // Was a translucent white hairline; Allodium-tauri's own `--explorer-
 // border`/`--sidebar-border` is this one solid slate instead (#333747),

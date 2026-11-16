@@ -17,6 +17,7 @@ use gpui::{
 
 use crate::audio::AudioEngine;
 use crate::channel_rack::ChannelRack;
+use crate::file_browser::FileBrowser;
 use crate::floating_panel::{
     self, PanelDrag, PanelDragKind, PanelGeometry, PanelKind, ShellDragMarker, MIN_PANEL_SIZE,
 };
@@ -32,6 +33,7 @@ struct PanelGeometries {
     piano_roll: PanelGeometry,
     playlist: PanelGeometry,
     mixer: PanelGeometry,
+    file_browser: PanelGeometry,
 }
 
 impl PanelGeometries {
@@ -41,6 +43,7 @@ impl PanelGeometries {
             PanelKind::PianoRoll => self.piano_roll,
             PanelKind::Playlist => self.playlist,
             PanelKind::Mixer => self.mixer,
+            PanelKind::FileBrowser => self.file_browser,
         }
     }
 
@@ -50,6 +53,7 @@ impl PanelGeometries {
             PanelKind::PianoRoll => &mut self.piano_roll,
             PanelKind::Playlist => &mut self.playlist,
             PanelKind::Mixer => &mut self.mixer,
+            PanelKind::FileBrowser => &mut self.file_browser,
         }
     }
 }
@@ -66,11 +70,16 @@ impl Default for PanelGeometries {
             maximized: false,
             pre_maximize: None,
         };
+        // Piano Roll and Playlist start maximized — their own geometry
+        // here is just what `restore` snaps back to if un-maximized, not
+        // what's actually shown on first launch.
+        let maximized_geo = |x: f32, y: f32, w: f32, h: f32| PanelGeometry { maximized: true, ..geo(x, y, w, h) };
         Self {
             channel_rack: geo(16.0, 16.0, 860.0, 260.0),
-            piano_roll: geo(16.0, 292.0, 860.0, 270.0),
-            playlist: geo(16.0, 578.0, 860.0, 220.0),
+            piano_roll: maximized_geo(16.0, 292.0, 860.0, 270.0),
+            playlist: maximized_geo(16.0, 578.0, 860.0, 220.0),
             mixer: geo(892.0, 16.0, 380.0, 500.0),
+            file_browser: geo(892.0, 532.0, 380.0, 266.0),
         }
     }
 }
@@ -81,6 +90,7 @@ pub struct AppShell {
     piano_roll: Entity<PianoRoll>,
     playlist: Entity<Playlist>,
     mixer: Entity<Mixer>,
+    file_browser: Entity<FileBrowser>,
     geometry: PanelGeometries,
     z_order: Vec<PanelKind>,
     drag: Option<PanelDrag>,
@@ -123,6 +133,7 @@ impl AppShell {
         let piano_roll = cx.new(|cx| PianoRoll::new(channel_rack.clone(), window, cx));
         let playlist = cx.new(|cx| Playlist::new(channel_rack.clone(), window, cx));
         let mixer = cx.new(|cx| Mixer::new(channel_rack.clone(), window, cx));
+        let file_browser = cx.new(|cx| FileBrowser::new(window, cx));
         let preferences = cx.new(|_| Preferences::new());
         let tempo_input = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe(&tempo_input, |this: &mut Self, _input, event: &InputEvent, cx| match event {
@@ -136,6 +147,7 @@ impl AppShell {
             piano_roll,
             playlist,
             mixer,
+            file_browser,
             geometry: PanelGeometries::default(),
             z_order: PanelKind::ALL.to_vec(),
             drag: None,
@@ -407,6 +419,7 @@ impl Render for AppShell {
                 PanelKind::PianoRoll => self.piano_roll.clone().into_any_element(),
                 PanelKind::Playlist => self.playlist.clone().into_any_element(),
                 PanelKind::Mixer => self.mixer.clone().into_any_element(),
+                PanelKind::FileBrowser => self.file_browser.clone().into_any_element(),
             };
             workspace = workspace.child(floating_panel::render_panel(
                 kind,

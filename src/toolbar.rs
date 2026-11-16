@@ -34,10 +34,13 @@
 //! control, just not driving a scheduler/audio feature that doesn't
 //! exist yet in this rewrite. Metronome goes one step further and ports
 //! the original's one real side effect (turning it on auto-starts
-//! playback). Only two controls have no faithful equivalent at all and
-//! stay inert, disabled chrome: the MIDI LED (no MIDI I/O anywhere in
-//! this codebase) and the Explorer panel toggle (no file-browser panel
-//! exists yet — MVP item #8, still unbuilt).
+//! playback). The Explorer panel toggle now opens the real File
+//! Browser panel (`src/file_browser.rs`, MVP item #8) via the same
+//! `AppShell::toggle_pill` the other floating panels use, just in its
+//! own dedicated slot ahead of that generic pill cluster rather than
+//! inside it. Only one control has no faithful equivalent at all and
+//! stays inert, disabled chrome: the MIDI LED (no MIDI I/O anywhere in
+//! this codebase).
 
 use gpui::assets::IconName;
 use gpui::component::button::{Button, ButtonVariants, Toggle, ToggleGroup, ToggleVariants};
@@ -271,9 +274,8 @@ fn transport_btn(
         }))
 }
 
-/// A disabled toggle with no backend at all (MIDI LED, the Explorer
-/// panel) — its hover-info note says so honestly rather than implying
-/// it works.
+/// A disabled toggle with no backend at all (just the MIDI LED now) —
+/// its hover-info note says so honestly rather than implying it works.
 fn inert(id: impl Into<gpui::ElementId>, icon: IconName, name: &'static str, note: &'static str, cx: &mut Context<AppShell>) -> impl IntoElement {
     let id: gpui::ElementId = id.into();
     div()
@@ -1017,10 +1019,17 @@ impl AppShell {
                             ),
                     )
                     .child(vsep())
-                    .child(inert("panel-explorer", IconName::FolderOpen, "File Explorer", "Not built yet — MVP item #8", cx))
+                    .child(self.toggle_pill(PanelKind::FileBrowser, cx))
                     .child({
                         let mut pills = div().flex().gap_1();
                         for kind in PanelKind::ALL {
+                            if kind == PanelKind::FileBrowser {
+                                // Already has its own dedicated slot just
+                                // above, ahead of the generic pill cluster
+                                // — the slot the inert "Not built yet"
+                                // placeholder used to occupy.
+                                continue;
+                            }
                             pills = pills.child(self.toggle_pill(kind, cx));
                         }
                         pills

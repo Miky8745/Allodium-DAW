@@ -56,6 +56,13 @@ pub struct Playlist {
     drag: DragMode,
     dying: Vec<DyingPlacement>,
     grid_origin: Rc<Cell<Point<Pixels>>>,
+    /// The grid canvas's own on-screen size, captured alongside
+    /// `grid_origin`. `clamp_scroll` needs the visible grid area's height,
+    /// not `window.viewport_size()` (the whole OS window, always taller
+    /// than this floating panel's own grid area) - see `piano_roll.rs`'s
+    /// identical fix for the bug this caused (scroll stopping short of
+    /// the real content end).
+    grid_size: Rc<Cell<gpui::Size<Pixels>>>,
 }
 
 impl Playlist {
@@ -69,6 +76,7 @@ impl Playlist {
             drag: DragMode::None,
             dying: Vec::new(),
             grid_origin: Rc::new(Cell::new(point(px(0.0), px(0.0)))),
+            grid_size: Rc::new(Cell::new(size(px(0.0), px(0.0)))),
         }
     }
 
@@ -226,7 +234,7 @@ impl Playlist {
 
 impl Render for Playlist {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.clamp_scroll(window.viewport_size(), cx);
+        self.clamp_scroll(self.grid_size.get(), cx);
         self.prune_dying();
         window.request_animation_frame();
 
@@ -255,16 +263,9 @@ impl Render for Playlist {
         let scroll_x = self.scroll_x;
         let scroll_y = self.scroll_y;
         let grid_origin = self.grid_origin.clone();
+        let grid_size = self.grid_size.clone();
 
-        // `rounded_bl` only (not `rounded_b`): this column sits at the
-        // panel's left edge, so only its bottom-*left* corner is an outer
-        // panel corner — its bottom-right corner is an internal seam
-        // against the grid area, which stays square. GPUI's overflow clip
-        // is a plain rectangle (see `floating_panel.rs`'s own note on the
-        // same limitation), so without this, this square-cornered column
-        // would show past the panel's rounded corner instead of being
-        // clipped to it.
-        let mut track_labels = div().flex().flex_col().w(px(TRACK_PANEL_W)).h_full().bg(theme::BG_PANEL).rounded_bl(theme::RADIUS_MD);
+        let mut track_labels = div().flex().flex_col().w(px(TRACK_PANEL_W)).h_full().bg(theme::BG_PANEL);
         for i in 0..TRACK_COUNT {
             track_labels = track_labels.child(
                 div()
@@ -406,16 +407,11 @@ impl Render for Playlist {
                             .relative()
                             .overflow_hidden()
                             .bg(rgb(0x1a1a1a))
-                            // This is the mirror image of `track_labels`'
-                            // own `rounded_bl` above: this area sits at the
-                            // panel's right edge, so only its bottom-
-                            // *right* corner is an outer panel corner.
-                            .rounded_br(theme::RADIUS_MD)
-                            .on_scroll(cx.listener(|this, ev: &ScrollEvent, window, cx| {
+                            .on_scroll(cx.listener(|this, ev: &ScrollEvent, _window, cx| {
                                 let delta = ev.delta.pixel_delta(px(ROW_H));
                                 this.scroll_x -= f32::from(delta.x);
                                 this.scroll_y -= f32::from(delta.y);
-                                this.clamp_scroll(window.viewport_size(), cx);
+                                this.clamp_scroll(this.grid_size.get(), cx);
                                 cx.notify();
                             }))
                             .child(
@@ -423,6 +419,7 @@ impl Render for Playlist {
                                     move |_, _, _| {},
                                     move |bounds, _, window, _| {
                                         grid_origin.set(bounds.origin);
+                                        grid_size.set(bounds.size);
                                         paint_lanes(window, bounds, scroll_x, scroll_y, beats_per_bar, song_step);
                                     },
                                 )

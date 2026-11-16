@@ -53,10 +53,12 @@ pub enum PanelKind {
     PianoRoll,
     Playlist,
     Mixer,
+    FileBrowser,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 4] = [PanelKind::ChannelRack, PanelKind::PianoRoll, PanelKind::Playlist, PanelKind::Mixer];
+    pub const ALL: [PanelKind; 5] =
+        [PanelKind::ChannelRack, PanelKind::PianoRoll, PanelKind::Playlist, PanelKind::Mixer, PanelKind::FileBrowser];
 
     /// A real vector icon (the bundled Lucide catalog — see
     /// `gpui::assets::AllAssets` registered in `main.rs`) rather than a
@@ -68,6 +70,7 @@ impl PanelKind {
             PanelKind::PianoRoll => IconName::Piano,
             PanelKind::Playlist => IconName::ListMusic,
             PanelKind::Mixer => IconName::SlidersVertical,
+            PanelKind::FileBrowser => IconName::Folder,
         }
     }
 
@@ -77,6 +80,7 @@ impl PanelKind {
             PanelKind::PianoRoll => "Piano Roll",
             PanelKind::Playlist => "Playlist",
             PanelKind::Mixer => "Mixer",
+            PanelKind::FileBrowser => "File Browser",
         }
     }
 
@@ -92,6 +96,7 @@ impl PanelKind {
             PanelKind::PianoRoll => Hsla { h: 175.0 / 360.0, s: 0.50, l: 0.62, a: 1.0 }, // teal
             PanelKind::Playlist => Hsla { h: 335.0 / 360.0, s: 0.60, l: 0.68, a: 1.0 }, // rose
             PanelKind::Mixer => Hsla { h: 145.0 / 360.0, s: 0.40, l: 0.62, a: 1.0 }, // sage
+            PanelKind::FileBrowser => Hsla { h: 45.0 / 360.0, s: 0.55, l: 0.66, a: 1.0 }, // gold
         }
     }
 }
@@ -187,8 +192,16 @@ pub fn render_panel(
 ) -> impl IntoElement {
     // Allodium-tauri's own maximized state goes square (`border-radius:
     // 0`) rather than keeping the normal rounding against the workspace
-    // edge it's now flush with.
-    let radius = if geometry.maximized { px(0.0) } else { theme::RADIUS_MD };
+    // edge it's now flush with. Piano Roll and Playlist stay square
+    // unconditionally (not just while maximized): both scroll opaque
+    // content (key rows, canvas-painted stripes/lanes) flush to their own
+    // edges, and GPUI's `overflow_hidden` clips to a plain rectangle with
+    // no rounded-corner variant, so any rounding on these two always let
+    // scrolled content poke square past the curve. Simplest fix left
+    // standing after chasing corner-masking tricks that didn't hold up
+    // under scroll: don't round these two at all.
+    let radius =
+        if geometry.maximized || matches!(kind, PanelKind::PianoRoll | PanelKind::Playlist) { px(0.0) } else { theme::RADIUS_MD };
     div()
         .absolute()
         .left(geometry.position.x)

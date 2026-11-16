@@ -1,6 +1,7 @@
 mod audio;
 mod channel_rack;
 mod color_utils;
+mod file_browser;
 mod floating_panel;
 mod mixer;
 mod perf;
