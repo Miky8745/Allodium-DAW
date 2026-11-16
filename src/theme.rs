@@ -271,6 +271,10 @@ pub const RADIUS_LG: Pixels = px(16.0);
 // guess: restoring it both answers "make it taller" and brings this
 // back in line with the original.
 pub const TOOLBAR_ROW_H: Pixels = px(50.0);
+/// Two stacked rows (see above) — the workspace's maximize-fill geometry
+/// needs this as a single figure rather than re-deriving `TOOLBAR_ROW_H *
+/// 2.0` at each call site.
+pub const TOOLBAR_TOTAL_H: Pixels = px(100.0);
 
 /// The desktop's actual installed/used font — confirmed via a direct
 /// config audit (waybar, swaync, wlogout, alacritty all pin this exact

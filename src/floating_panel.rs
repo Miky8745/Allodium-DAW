@@ -9,11 +9,43 @@
 use gpui::assets::IconName;
 use gpui::component::{Icon, Sizable};
 use gpui::{
-    App, BoxShadow, ClickEvent, Hsla, IntoElement, MouseButton, MouseDownEvent, ParentElement,
-    Pixels, Point, SharedString, Size, Styled, Window, div, point, prelude::*, px,
+    App, BoxShadow, ClickEvent, Context, Empty, Entity, Hsla, IntoElement, MouseButton,
+    MouseDownEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, SharedString, Size,
+    StatefulInteractiveElement, Styled, Window, div, point, prelude::*, px,
 };
 
 use crate::theme;
+
+/// Carried by GPUI's own drag-and-drop machinery (`on_drag`/`on_drag_move`)
+/// for every click-and-drag gesture this app does by hand: panel move,
+/// panel resize, and the toolbar's BPM-pill drag (see `toolbar.rs`). Plain
+/// `on_mouse_move` tracking on the workspace root broke once panels
+/// started occluding each other: `InteractiveElement::occlude`'s
+/// `BlockMouse` hit-test behavior stops hit-testing at the first occluded
+/// hitbox it finds, which — since a div inserts its own hitbox before its
+/// children's — also swallows every *ancestor* hitbox behind it, the
+/// workspace root included. `on_drag_move` sidesteps this entirely: it's
+/// dispatched by payload type during the capture phase, with no
+/// hitbox/hover check at all, so it keeps firing regardless of what's
+/// occluding what or where the pointer physically is.
+#[derive(Clone, Copy)]
+pub struct ShellDragMarker;
+
+/// The view GPUI's drag API requires a constructor for. These drags
+/// reposition real state (`PanelGeometry`, tempo) directly on every
+/// `on_drag_move` tick rather than following a floating drag-preview
+/// ghost, so this renders nothing.
+pub struct DragPreview;
+
+impl Render for DragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+pub(crate) fn drag_preview(_: &ShellDragMarker, _: Point<Pixels>, _: &mut Window, cx: &mut App) -> Entity<DragPreview> {
+    cx.new(|_| DragPreview)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum PanelKind {
@@ -69,6 +101,13 @@ pub struct PanelGeometry {
     pub position: Point<Pixels>,
     pub size: Size<Pixels>,
     pub open: bool,
+    pub maximized: bool,
+    /// The position/size to restore when un-maximizing — `Some` only
+    /// while `maximized` is true. Allodium-tauri's own `FloatingWindow`
+    /// leaves these untouched during the maximized stretch so restoring
+    /// snaps back to exactly where the panel was, rather than recomputing
+    /// a default layout.
+    pub pre_maximize: Option<(Point<Pixels>, Size<Pixels>)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -117,8 +156,10 @@ fn panel_shadow(drag_boost: bool) -> Vec<BoxShadow> {
 }
 
 /// Wraps `body` in the shared panel chrome: a title bar (glyph + title +
-/// close button, draggable to move the panel) and a resize handle at the
-/// bottom-right corner. `on_focus` fires on a click anywhere in the panel
+/// maximize/close buttons, draggable to move the panel) and a resize
+/// handle at the bottom-right corner (hidden while maximized, matching
+/// Allodium-tauri's own `FloatingWindow`). `on_focus` fires on a click
+/// anywhere in the panel
 /// (title bar or body) — confirmed against GPUI's own dispatch (`div.rs`)
 /// that a parent's `on_any_mouse_down` still fires regardless of what a
 /// child's own mouse handler does, so this doesn't interfere with the
@@ -133,8 +174,21 @@ pub fn render_panel(
     on_focus: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     on_drag_start: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     on_resize_start: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    // Cancels a pending move/resize that never crossed GPUI's own drag
+    // threshold (a plain click) — see `ShellDragMarker`'s doc comment and
+    // `AppShell::cancel_pending_click`. Separate callbacks, one per
+    // element, since each needs to be `is_hovered` on release for the
+    // plain-click case, and a title-bar click and a resize-handle click
+    // release over different elements.
+    on_move_release: impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static,
+    on_resize_release: impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static,
+    on_maximize: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    // Allodium-tauri's own maximized state goes square (`border-radius:
+    // 0`) rather than keeping the normal rounding against the workspace
+    // edge it's now flush with.
+    let radius = if geometry.maximized { px(0.0) } else { theme::RADIUS_MD };
     div()
         .absolute()
         .left(geometry.position.x)
@@ -144,11 +198,16 @@ pub fn render_panel(
         .flex()
         .flex_col()
         .overflow_hidden()
-        .rounded(theme::RADIUS_MD)
+        .rounded(radius)
         .bg(theme::BG_PANEL.alpha(0.94))
         .border_1()
         .border_color(theme::BORDER)
         .shadow(panel_shadow(dragging_this))
+        // Stops clicks from reaching whatever panel sits behind this one
+        // in z-order wherever they visually overlap — GPUI's hit-testing
+        // otherwise still lets a lower hitbox handle the event even when
+        // a higher one fully covers that pixel.
+        .occlude()
         .when(focused, |d| {
             let identity = kind.identity_color();
             d.border_color(identity).shadow(
@@ -172,11 +231,21 @@ pub fn render_panel(
                 .items_center()
                 .gap_2()
                 .px_2()
+                // Rounds this div's own top corners to match the outer
+                // frame instead of depending on the frame's overflow clip
+                // to do it — GPUI's content mask is always a plain
+                // rectangle (its own `ContentMask` type carries only
+                // `bounds`, never a shape), so a square-cornered child
+                // flush against a rounded parent's edge visibly pokes out
+                // past the rounded border rather than being clipped to it.
+                .rounded_t(radius)
                 .bg(theme::HEADER_BG)
                 .border_b_1()
                 .border_color(theme::BORDER)
                 .cursor_default()
                 .on_mouse_down(MouseButton::Left, on_drag_start)
+                .on_mouse_up(MouseButton::Left, on_move_release)
+                .on_drag(ShellDragMarker, drag_preview)
                 .child(Icon::new(kind.icon()).small().text_color(kind.identity_color()))
                 .child(
                     div()
@@ -185,6 +254,21 @@ pub fn render_panel(
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme::MAIN_TEXT)
                         .child(title.into()),
+                )
+                .child(
+                    div()
+                        .id(("panel-maximize", kind as u8 as usize))
+                        .w(px(18.0))
+                        .h(px(18.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(theme::RADIUS_XS)
+                        .text_color(theme::accent_dim())
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme::BTN_HOVER).text_color(theme::MAIN_TEXT))
+                        .child(Icon::new(if geometry.maximized { IconName::Minimize2 } else { IconName::Maximize }).xsmall())
+                        .on_click(on_maximize),
                 )
                 .child(
                     div()
@@ -202,24 +286,28 @@ pub fn render_panel(
                         .on_click(on_close),
                 ),
         )
-        .child(div().flex_1().w_full().overflow_hidden().child(body))
-        .child(
-            div()
-                .id(("panel-resize", kind as u8 as usize))
-                .absolute()
-                .right_0()
-                .bottom_0()
-                .w(RESIZE_HANDLE_SIZE)
-                .h(RESIZE_HANDLE_SIZE)
-                .flex()
-                .items_end()
-                .justify_end()
-                .px(px(2.0))
-                .pb(px(1.0))
-                .cursor_default()
-                .text_color(theme::accent_dim().alpha(0.35))
-                .hover(|s| s.text_color(theme::accent_dim()))
-                .child(Icon::new(IconName::ResizeCorner).xsmall())
-                .on_mouse_down(MouseButton::Left, on_resize_start),
-        )
+        .child(div().flex_1().w_full().rounded_b(radius).overflow_hidden().child(body))
+        .when(!geometry.maximized, |d| {
+            d.child(
+                div()
+                    .id(("panel-resize", kind as u8 as usize))
+                    .absolute()
+                    .right_0()
+                    .bottom_0()
+                    .w(RESIZE_HANDLE_SIZE)
+                    .h(RESIZE_HANDLE_SIZE)
+                    .flex()
+                    .items_end()
+                    .justify_end()
+                    .px(px(2.0))
+                    .pb(px(1.0))
+                    .cursor_default()
+                    .text_color(theme::accent_dim().alpha(0.35))
+                    .hover(|s| s.text_color(theme::accent_dim()))
+                    .child(Icon::new(IconName::ResizeCorner).xsmall())
+                    .on_mouse_down(MouseButton::Left, on_resize_start)
+                    .on_mouse_up(MouseButton::Left, on_resize_release)
+                    .on_drag(ShellDragMarker, drag_preview),
+            )
+        })
 }

@@ -10,14 +10,16 @@ use std::sync::Arc;
 use gpui::component::input::{InputEvent, InputState};
 use gpui::component::{Icon, Sizable};
 use gpui::{
-    AppContext, ClickEvent, Context, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Styled, Window, div,
+    AppContext, ClickEvent, Context, DragMoveEvent, Entity, Focusable, IntoElement, ModifiersChangedEvent,
+    MouseDownEvent, ParentElement, Pixels, Point, Render, Styled, Window, div,
     linear_color_stop, linear_gradient, point, prelude::*, px, size,
 };
 
 use crate::audio::AudioEngine;
 use crate::channel_rack::ChannelRack;
-use crate::floating_panel::{self, PanelDrag, PanelDragKind, PanelGeometry, PanelKind, MIN_PANEL_SIZE};
+use crate::floating_panel::{
+    self, PanelDrag, PanelDragKind, PanelGeometry, PanelKind, ShellDragMarker, MIN_PANEL_SIZE,
+};
 use crate::mixer::Mixer;
 use crate::perf::FrameStats;
 use crate::piano_roll::PianoRoll;
@@ -61,6 +63,8 @@ impl Default for PanelGeometries {
             position: point(px(x), px(y)),
             size: size(px(w), px(h)),
             open: true,
+            maximized: false,
+            pre_maximize: None,
         };
         Self {
             channel_rack: geo(16.0, 16.0, 860.0, 260.0),
@@ -81,6 +85,16 @@ pub struct AppShell {
     z_order: Vec<PanelKind>,
     drag: Option<PanelDrag>,
     tempo_drag: Option<TempoDrag>,
+    /// Whether the *current* `drag`/`tempo_drag` has actually crossed
+    /// GPUI's own drag threshold and become a real `cx.active_drag` (see
+    /// the root div's `on_drag_move` below) — not just a mouse-down that
+    /// might turn out to be a plain click. Needed because `begin_drag`
+    /// sets `drag`/`tempo_drag` *before* that threshold is crossed, so
+    /// polling `cx.has_active_drag()` alone to decide "the drag ended"
+    /// would immediately — and wrongly — cancel every drag the instant
+    /// after it starts, while the pointer is still within the 2px
+    /// threshold and `active_drag` hasn't been set yet.
+    drag_confirmed: bool,
     pub(crate) toolbar: crate::toolbar::ToolbarState,
     /// Created once here rather than inside the Preferences dialog's own
     /// `open_dialog` builder — that builder can re-run on every rebuild
@@ -126,6 +140,7 @@ impl AppShell {
             z_order: PanelKind::ALL.to_vec(),
             drag: None,
             tempo_drag: None,
+            drag_confirmed: false,
             toolbar: crate::toolbar::ToolbarState::default(),
             preferences,
             tempo_input,
@@ -138,6 +153,25 @@ impl AppShell {
         }
         let start_tempo = self.channel_rack.read(cx).tempo();
         self.tempo_drag = Some(TempoDrag { start_mouse_y: mouse_y, start_tempo });
+        self.drag_confirmed = false;
+    }
+
+    /// Clears a pending `drag`/`tempo_drag` that never actually turned into
+    /// a real drag — a plain click that didn't cross GPUI's own 2px
+    /// threshold, so `cx.active_drag` never became `Some` and the root
+    /// div's `on_drag_move` never got a chance to run. Wired to
+    /// `on_mouse_up` on the same element `begin_drag`/`begin_tempo_drag`
+    /// started from, which (for a click that short) is still reliably
+    /// hovered at release time. A *confirmed* drag's own end is handled
+    /// separately, by polling `cx.has_active_drag()` once `drag_confirmed`
+    /// is true — see that field's own doc comment.
+    pub(crate) fn cancel_pending_click(&mut self, cx: &mut Context<Self>) {
+        if self.drag_confirmed {
+            return;
+        }
+        if self.drag.take().is_some() || self.tempo_drag.take().is_some() {
+            cx.notify();
+        }
     }
 
     fn update_tempo_drag(&mut self, mouse_y: Pixels, cx: &mut Context<Self>) {
@@ -209,14 +243,57 @@ impl AppShell {
         }
     }
 
+    /// The rect actually drawn for `kind` this frame: its stored geometry
+    /// normally, or pinned to fill `workspace_size` (at the workspace's
+    /// own origin, since panels are positioned relative to it rather than
+    /// the window) while maximized. Mirrors Allodium-tauri's own
+    /// `FloatingWindow`, which maximizes into its workspace zone rather
+    /// than the raw window bounds, never covering the toolbar.
+    fn display_geometry(&self, kind: PanelKind, workspace_size: gpui::Size<Pixels>) -> PanelGeometry {
+        let geo = self.geometry.get(kind);
+        if geo.maximized {
+            PanelGeometry { position: point(px(0.0), px(0.0)), size: workspace_size, ..geo }
+        } else {
+            geo
+        }
+    }
+
     fn close_panel(&mut self, kind: PanelKind, cx: &mut Context<Self>) {
         self.geometry.get_mut(kind).open = false;
         cx.notify();
     }
 
+    /// Mirrors Allodium-tauri's own `FloatingWindow.toggleMaximize`: stash
+    /// the current rect on the way in, restore it on the way out, so
+    /// toggling off snaps back to exactly where the panel was rather than
+    /// recomputing a default layout.
+    fn toggle_maximize(&mut self, kind: PanelKind, cx: &mut Context<Self>) {
+        let geo = self.geometry.get_mut(kind);
+        if geo.maximized {
+            if let Some((position, size)) = geo.pre_maximize.take() {
+                geo.position = position;
+                geo.size = size;
+            }
+            geo.maximized = false;
+        } else {
+            geo.pre_maximize = Some((geo.position, geo.size));
+            geo.maximized = true;
+        }
+        self.focus_panel(kind, cx);
+    }
+
     fn begin_drag(&mut self, kind: PanelKind, drag_kind: PanelDragKind, mouse: Point<Pixels>, cx: &mut Context<Self>) {
         let geo = self.geometry.get(kind);
+        // Allodium-tauri's own `onDragStart`/`onResizeStart` both no-op
+        // while maximized — there's nothing sensible for a move or resize
+        // to do when the rect is pinned to the workspace, and the drag
+        // start position itself (the stashed pre-maximize rect) isn't
+        // where the panel currently visually is.
+        if geo.maximized {
+            return;
+        }
         self.drag = Some(PanelDrag { kind: drag_kind, panel: kind, start_mouse: mouse, start_position: geo.position, start_size: geo.size });
+        self.drag_confirmed = false;
         self.focus_panel(kind, cx);
     }
 
@@ -282,6 +359,21 @@ impl Render for AppShell {
         window.request_animation_frame();
         cx.notify();
 
+        // GPUI auto-releases `cx.active_drag` on any mouse-up system-wide
+        // (its own `dispatch_mouse_event`, unconditionally, before this
+        // view even redraws) — so by the next frame after a release, this
+        // is the reliable signal that a *confirmed* drag ended, standing
+        // in for the `on_mouse_up`/`on_mouse_up_out` this root div can no
+        // longer use for that now that drag tracking has moved to
+        // `on_drag_move` (see the root div's own comment below for why).
+        // Gated on `drag_confirmed` — see that field's doc comment for why
+        // this can't just check `!cx.has_active_drag()` unconditionally.
+        if self.drag_confirmed && !cx.has_active_drag() {
+            self.end_drag(cx);
+            self.end_tempo_drag();
+            self.drag_confirmed = false;
+        }
+
         let piano_roll_channel_name = {
             let rack = self.channel_rack.read(cx);
             rack.selected_channel_id().and_then(|id| rack.channels().iter().find(|c| c.id == id)).map(|c| {
@@ -293,12 +385,14 @@ impl Render for AppShell {
             None => "Piano Roll".to_string(),
         };
 
-        let available_mixer_h = self.geometry.get(PanelKind::Mixer).size.height - px(26.0);
+        let workspace_size = size(window.viewport_size().width, window.viewport_size().height - theme::TOOLBAR_TOTAL_H);
+
+        let available_mixer_h = self.display_geometry(PanelKind::Mixer, workspace_size).size.height - px(26.0);
         self.mixer.update(cx, |m, cx| m.set_fader_height((available_mixer_h - px(140.0)).max(px(40.0)), cx));
 
         let mut workspace = div().absolute().left_0().top_0().size_full();
         for kind in self.z_order.clone() {
-            let geo = self.geometry.get(kind);
+            let geo = self.display_geometry(kind, workspace_size);
             if !geo.open {
                 continue;
             }
@@ -324,6 +418,9 @@ impl Render for AppShell {
                 cx.listener(move |this, _: &MouseDownEvent, _, cx| this.focus_panel(kind, cx)),
                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.begin_drag(kind, PanelDragKind::Move, ev.position, cx)),
                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.begin_drag(kind, PanelDragKind::Resize, ev.position, cx)),
+                cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| this.cancel_pending_click(cx)),
+                cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| this.cancel_pending_click(cx)),
+                cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_maximize(kind, cx)),
                 cx.listener(move |this, _: &ClickEvent, _, cx| this.close_panel(kind, cx)),
             ));
         }
@@ -334,27 +431,35 @@ impl Render for AppShell {
             .flex_col()
             .bg(theme::BG_APP)
             .font_family(theme::FONT_UI)
-            // Mouse tracking for both drag gestures (floating panels, the
-            // BPM pill) lives on this outer root rather than the workspace
-            // div below: a drag that starts on the toolbar's tempo pill
-            // must keep tracking even while the pointer wanders outside
-            // the workspace's own bounds.
-            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+            .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, _, cx| {
                 this.toolbar.modifiers = ev.modifiers;
+                cx.notify();
+            }))
+            // Drag tracking for both click-drag gestures (floating panels,
+            // the BPM pill) rides GPUI's own drag-and-drop machinery
+            // (`on_drag` on the originating element in `floating_panel.rs`/
+            // `toolbar.rs`, `on_drag_move` here) rather than plain
+            // `on_mouse_move` on this outer root: `on_drag_move` is
+            // dispatched by payload type with no hitbox/hover check at
+            // all, so — unlike `on_mouse_move` — it isn't blocked by a
+            // panel's `occlude()` sitting between the pointer and this
+            // root div, and it keeps tracking even while the pointer
+            // wanders outside the workspace's own bounds. See
+            // `ShellDragMarker` in `floating_panel.rs`.
+            .on_drag_move::<ShellDragMarker>(cx.listener(|this, event: &DragMoveEvent<ShellDragMarker>, _, cx| {
+                // Reaching here at all means `cx.active_drag` is genuinely
+                // `Some` for this payload type — the real signal (as
+                // opposed to a mouse-down that might still turn out to be
+                // a plain click) that this is a confirmed drag. See
+                // `drag_confirmed`'s own doc comment.
+                this.drag_confirmed = true;
+                let position = event.event.position;
                 if this.drag.is_some() {
-                    this.update_drag(ev.position, cx);
+                    this.update_drag(position, cx);
                 }
                 if this.tempo_drag.is_some() {
-                    this.update_tempo_drag(ev.position.y, cx);
+                    this.update_tempo_drag(position.y, cx);
                 }
-            }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                this.end_drag(cx);
-                this.end_tempo_drag();
-            }))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                this.end_drag(cx);
-                this.end_tempo_drag();
             }))
             .child(self.render_toolbar(cx))
             .child(

@@ -49,7 +49,7 @@ use gpui::{
     BoxShadow, ClickEvent, Context, Hsla, IntoElement, MouseButton, MouseDownEvent, Modifiers,
     ParentElement, ScrollEvent, Styled, Window, div, point, prelude::*, px,
 };
-use crate::floating_panel::PanelKind;
+use crate::floating_panel::{self, PanelKind, ShellDragMarker};
 use crate::preferences;
 use crate::shell::AppShell;
 use crate::theme;
@@ -835,6 +835,11 @@ impl AppShell {
                                 MouseButton::Left,
                                 cx.listener(|this, ev: &MouseDownEvent, _, cx| this.begin_tempo_drag(ev.position.y, cx)),
                             )
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| this.cancel_pending_click(cx)),
+                            )
+                            .on_drag(ShellDragMarker, floating_panel::drag_preview)
                             .on_click(cx.listener(|this, ev: &ClickEvent, window, cx| {
                                 if ev.click_count() >= 2 {
                                     this.start_edit_tempo(window, cx);
