@@ -90,6 +90,45 @@ impl ChannelRack {
         self.project.tempo
     }
 
+    /// Current (L, R) master-bus peak level, for the toolbar's peak meter.
+    pub fn peak_levels(&self) -> (f32, f32) {
+        self.engine.peak_levels()
+    }
+
+    /// The toolbar oscilloscope's most recent window of the master mix.
+    pub fn scope_snapshot(&self) -> Vec<f32> {
+        self.engine.scope_snapshot()
+    }
+
+    /// The toolbar spectrum analyzer's most recent window of the master mix.
+    pub fn fft_snapshot(&self) -> Vec<f32> {
+        self.engine.fft_snapshot()
+    }
+
+    pub fn start_system_capture(&self) {
+        self.engine.start_system_capture();
+    }
+
+    pub fn stop_system_capture(&self) {
+        self.engine.stop_system_capture();
+    }
+
+    pub fn system_peak_levels(&self) -> (f32, f32) {
+        self.engine.system_peak_levels()
+    }
+
+    pub fn system_scope_snapshot(&self) -> Vec<f32> {
+        self.engine.system_scope_snapshot()
+    }
+
+    pub fn system_fft_snapshot(&self) -> Vec<f32> {
+        self.engine.system_fft_snapshot()
+    }
+
+    pub fn system_capture_error(&self) -> Option<String> {
+        self.engine.system_capture_error()
+    }
+
     /// Live-updates the engine's BPM immediately if playing (`set_bpm`),
     /// matching the original's scroll-to-adjust toolbar tempo display.
     pub fn set_tempo(&mut self, tempo: f64, cx: &mut Context<Self>) {

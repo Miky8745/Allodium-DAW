@@ -15,6 +15,9 @@ serde = { version = "1", features = ["derive"] }
 quick-xml = { version = "0.41.0", features = ["serialize"] }
 symphonia = { version = "0.5", features = ["wav", "ogg", "vorbis", "mp3", "pcm", "flac"] }
 rfd = "0.15"
+# The toolbar's spectrum-analyzer mode (`toolbar::spectrogram`) — a real
+# FFT, not a hand-rolled DFT; rustfft is the standard pure-Rust choice.
+rustfft = "6"
 
 [profile.dev]
 opt-level = 1

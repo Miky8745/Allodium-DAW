@@ -8,6 +8,7 @@
 mod envelope;
 mod pitch;
 mod sample;
+mod system_capture;
 
 pub use envelope::Envelope;
 pub use pitch::{pitch_to_playback_rate, step_duration_secs};
@@ -15,8 +16,10 @@ pub use sample::{SampleBuffer, decode_sample};
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, mpsc};
+
+use system_capture::SystemCapture;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -332,6 +335,120 @@ struct PlaybackState {
     song_length_steps: AtomicU32,
 }
 
+/// Toolbar's audio monitor + peak meter (`src/toolbar.rs`'s `oscilloscope`
+/// and `peak_meter`) — real master-bus metering, not the placeholder
+/// "no hook yet" chrome this rewrite shipped with before. All three
+/// fields are written from inside the audio callback every output frame,
+/// so they're plain atomics (an `f32` stored as its bit pattern via
+/// `to_bits`/`from_bits`, same trick `bpm_centibeats` already uses for
+/// BPM) rather than anything that could block that thread.
+struct MeterState {
+    /// Windowed max `|sample|` since the last `take_frame_peak` call —
+    /// see that method's doc comment.
+    peak_l: AtomicU32,
+    peak_r: AtomicU32,
+    /// A ring buffer of the mono mix, decimated (`SCOPE_DECIMATION`) so
+    /// `SCOPE_LEN` samples span a visually useful ~tens-of-milliseconds
+    /// window instead of ~3ms of raw 44.1kHz audio — the oscilloscope's
+    /// source.
+    scope: [AtomicU32; MeterState::SCOPE_LEN],
+    scope_write: AtomicUsize,
+    /// A *non*-decimated ring buffer of the mono mix — the spectrum
+    /// analyzer's source. Needs full sample-rate resolution (decimating
+    /// it the way `scope` is would alias higher frequencies down into
+    /// lower bins with no anti-aliasing filter to prevent it); the
+    /// oscilloscope's wider, lower-resolution window is a better fit for
+    /// *that* trace, so the two don't share one buffer.
+    fft_buf: [AtomicU32; FFT_LEN],
+    fft_write: AtomicUsize,
+    /// Counts every output frame (not gated on `playing`, unlike
+    /// `samples_played`) purely to decide when `scope` next advances.
+    frame_counter: AtomicU32,
+}
+
+/// Public so `toolbar::spectrogram` can size its own `rustfft` plan to
+/// match. A power of two (`rustfft` doesn't require it, but it's the
+/// efficient case) spanning ~23ms at 44.1kHz — short enough to feel live,
+/// long enough for the exponential-bucket bar mapping (`toolbar::
+/// bin_edge`) to have real low-frequency resolution to work with.
+pub(crate) const FFT_LEN: usize = 1024;
+
+impl MeterState {
+    const SCOPE_LEN: usize = 160;
+    const SCOPE_DECIMATION: u32 = 16;
+
+    fn new() -> Self {
+        Self {
+            peak_l: AtomicU32::new(0),
+            peak_r: AtomicU32::new(0),
+            scope: std::array::from_fn(|_| AtomicU32::new(0)),
+            scope_write: AtomicUsize::new(0),
+            fft_buf: std::array::from_fn(|_| AtomicU32::new(0)),
+            fft_write: AtomicUsize::new(0),
+            frame_counter: AtomicU32::new(0),
+        }
+    }
+
+    fn bump_max(slot: &AtomicU32, level: f32) {
+        let mut current = slot.load(Ordering::Relaxed);
+        loop {
+            if level <= f32::from_bits(current) {
+                return;
+            }
+            match slot.compare_exchange_weak(current, level.to_bits(), Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Called once per output sample-frame from the audio callback with
+    /// that frame's final (post-soft-clip) mix.
+    fn push_frame(&self, mix_l: f32, mix_r: f32) {
+        Self::bump_max(&self.peak_l, mix_l.abs());
+        Self::bump_max(&self.peak_r, mix_r.abs());
+
+        let mono = (mix_l + mix_r) * 0.5;
+
+        if self.frame_counter.fetch_add(1, Ordering::Relaxed) % Self::SCOPE_DECIMATION == 0 {
+            let idx = self.scope_write.fetch_add(1, Ordering::Relaxed) % Self::SCOPE_LEN;
+            self.scope[idx].store(mono.to_bits(), Ordering::Relaxed);
+        }
+
+        let fft_idx = self.fft_write.fetch_add(1, Ordering::Relaxed) % FFT_LEN;
+        self.fft_buf[fft_idx].store(mono.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The max `|sample|` seen on each channel since the *previous* call
+    /// to this method — a windowed instantaneous peak, consumed on read
+    /// (reset to 0 as part of the same atomic swap), not a smoothed
+    /// envelope. Matches Allodium-tauri's own split: its `peakOf` is this
+    /// same per-poll raw max, and the attack/release envelope
+    /// (`PeakMeter.svelte`'s `ampL = peakL > ampL ? peakL : ampL *
+    /// RELEASE`) is applied by the *caller*, once per animation frame —
+    /// not something that belongs at audio-sample rate, which has no
+    /// well-defined "per frame" to release across. `toolbar::
+    /// ToolbarState` is this app's equivalent caller.
+    fn take_frame_peak(&self) -> (f32, f32) {
+        let l = f32::from_bits(self.peak_l.swap(0.0f32.to_bits(), Ordering::Relaxed));
+        let r = f32::from_bits(self.peak_r.swap(0.0f32.to_bits(), Ordering::Relaxed));
+        (l, r)
+    }
+
+    /// The last `SCOPE_LEN` scope samples, oldest first.
+    fn scope_snapshot(&self) -> Vec<f32> {
+        let write = self.scope_write.load(Ordering::Relaxed);
+        (0..Self::SCOPE_LEN).map(|i| f32::from_bits(self.scope[(write + i) % Self::SCOPE_LEN].load(Ordering::Relaxed))).collect()
+    }
+
+    /// The last `FFT_LEN` raw (non-decimated) samples, oldest first — the
+    /// spectrum analyzer's input window.
+    fn fft_snapshot(&self) -> Vec<f32> {
+        let write = self.fft_write.load(Ordering::Relaxed);
+        (0..FFT_LEN).map(|i| f32::from_bits(self.fft_buf[(write + i) % FFT_LEN].load(Ordering::Relaxed))).collect()
+    }
+}
+
 /// Sent from the UI thread into the running audio callback. Applied at
 /// the top of each buffer (not per-frame — up to one buffer's worth of
 /// latency, a few milliseconds, which is imperceptible for a UI edit).
@@ -365,6 +482,15 @@ pub struct AudioEngine {
     _stream: cpal::Stream,
     sender: mpsc::Sender<EngineMessage>,
     state: Arc<PlaybackState>,
+    meter: Arc<MeterState>,
+    /// "System audio" monitor source — see `system_capture.rs`. A
+    /// separate `MeterState` from `meter` (which only ever reflects this
+    /// engine's own mix), started/stopped by `{start,stop}_
+    /// system_capture` in response to the toolbar's monitor-source
+    /// toggle, not running by default.
+    system_meter: Arc<MeterState>,
+    system_capture: Mutex<Option<SystemCapture>>,
+    system_error: Mutex<Option<String>>,
 }
 
 impl AudioEngine {
@@ -385,8 +511,11 @@ impl AudioEngine {
             song_length_steps: AtomicU32::new(16),
         });
 
+        let meter = Arc::new(MeterState::new());
+
         let (sender, receiver) = mpsc::channel::<EngineMessage>();
         let callback_state = state.clone();
+        let callback_meter = meter.clone();
         let mut channels: Vec<ChannelVoiceData> = Vec::new();
         let mut pattern_length_steps: i64 = 16;
         let mut song_placements: Vec<SongPlacementVoiceData> = Vec::new();
@@ -514,6 +643,7 @@ impl AudioEngine {
                         // mix compresses gracefully instead of crackling.
                         let mix_l = (bus_l[master_idx] * master_volume).tanh();
                         let mix_r = (bus_r[master_idx] * master_volume).tanh();
+                        callback_meter.push_frame(mix_l, mix_r);
 
                         match frame.len() {
                             1 => frame[0] = (mix_l + mix_r) * 0.5,
@@ -531,7 +661,15 @@ impl AudioEngine {
             .map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
 
-        Ok(Self { _stream: stream, sender, state })
+        Ok(Self {
+            _stream: stream,
+            sender,
+            state,
+            meter,
+            system_meter: Arc::new(MeterState::new()),
+            system_capture: Mutex::new(None),
+            system_error: Mutex::new(None),
+        })
     }
 
     pub fn is_playing(&self) -> bool {
@@ -540,6 +678,69 @@ impl AudioEngine {
 
     pub fn set_bpm(&self, bpm: f64) {
         self.state.bpm_centibeats.store((bpm * 100.0).round() as u32, Ordering::Relaxed);
+    }
+
+    /// (L, R) max `|sample|` since the last call — see
+    /// `MeterState::take_frame_peak`. Call once per UI frame; the caller
+    /// (`toolbar::ToolbarState`) applies its own attack/release envelope
+    /// on top, at render cadence.
+    pub fn peak_levels(&self) -> (f32, f32) {
+        self.meter.take_frame_peak()
+    }
+
+    /// The toolbar oscilloscope's most recent window of the master mix,
+    /// oldest sample first.
+    pub fn scope_snapshot(&self) -> Vec<f32> {
+        self.meter.scope_snapshot()
+    }
+
+    /// The toolbar spectrum analyzer's most recent (non-decimated)
+    /// window of the master mix, oldest sample first.
+    pub fn fft_snapshot(&self) -> Vec<f32> {
+        self.meter.fft_snapshot()
+    }
+
+    /// Starts "System audio" capture (see `system_capture.rs`) if it
+    /// isn't already running. Replaces any previous failure recorded in
+    /// `system_capture_error` with the result of this attempt.
+    pub fn start_system_capture(&self) {
+        let mut capture = self.system_capture.lock().unwrap();
+        if capture.is_some() {
+            return;
+        }
+        match SystemCapture::start(self.system_meter.clone()) {
+            Ok(c) => {
+                *capture = Some(c);
+                *self.system_error.lock().unwrap() = None;
+            }
+            Err(e) => *self.system_error.lock().unwrap() = Some(e),
+        }
+    }
+
+    /// Stops "System audio" capture (dropping it kills the `pw-record`
+    /// child process) and clears any recorded error.
+    pub fn stop_system_capture(&self) {
+        *self.system_capture.lock().unwrap() = None;
+        *self.system_error.lock().unwrap() = None;
+    }
+
+    pub fn system_peak_levels(&self) -> (f32, f32) {
+        self.system_meter.take_frame_peak()
+    }
+
+    pub fn system_scope_snapshot(&self) -> Vec<f32> {
+        self.system_meter.scope_snapshot()
+    }
+
+    pub fn system_fft_snapshot(&self) -> Vec<f32> {
+        self.system_meter.fft_snapshot()
+    }
+
+    /// Why `start_system_capture` last failed, if it did — e.g. PipeWire's
+    /// CLI tools aren't on `PATH`. `None` once capture is running (or
+    /// before it's ever been attempted).
+    pub fn system_capture_error(&self) -> Option<String> {
+        self.system_error.lock().unwrap().clone()
     }
 
     /// Continuous (non-floored) step position within the loop, suitable
