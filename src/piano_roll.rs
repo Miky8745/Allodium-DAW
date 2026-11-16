@@ -271,6 +271,14 @@ impl Render for PianoRoll {
                     .size_full()
                     .overflow_hidden()
                     .bg(rgb(0x1a1a1a))
+                    // Rounds its own bottom corners to match the floating
+                    // panel's outer rounded edge — GPUI's overflow clip is
+                    // a plain rectangle, so without this, this square-
+                    // cornered full-size background would show past the
+                    // panel's rounded corner instead of being clipped to
+                    // it (see `floating_panel.rs`'s own note on the same
+                    // limitation).
+                    .rounded_b(theme::RADIUS_MD)
                     .on_scroll(cx.listener(|this, ev: &ScrollEvent, window, cx| {
                         let delta = ev.delta.pixel_delta(px(KEY_H));
                         this.scroll_x -= f32::from(delta.x);

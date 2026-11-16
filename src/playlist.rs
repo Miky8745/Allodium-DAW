@@ -256,7 +256,15 @@ impl Render for Playlist {
         let scroll_y = self.scroll_y;
         let grid_origin = self.grid_origin.clone();
 
-        let mut track_labels = div().flex().flex_col().w(px(TRACK_PANEL_W)).h_full().bg(theme::BG_PANEL);
+        // `rounded_bl` only (not `rounded_b`): this column sits at the
+        // panel's left edge, so only its bottom-*left* corner is an outer
+        // panel corner — its bottom-right corner is an internal seam
+        // against the grid area, which stays square. GPUI's overflow clip
+        // is a plain rectangle (see `floating_panel.rs`'s own note on the
+        // same limitation), so without this, this square-cornered column
+        // would show past the panel's rounded corner instead of being
+        // clipped to it.
+        let mut track_labels = div().flex().flex_col().w(px(TRACK_PANEL_W)).h_full().bg(theme::BG_PANEL).rounded_bl(theme::RADIUS_MD);
         for i in 0..TRACK_COUNT {
             track_labels = track_labels.child(
                 div()
@@ -398,6 +406,11 @@ impl Render for Playlist {
                             .relative()
                             .overflow_hidden()
                             .bg(rgb(0x1a1a1a))
+                            // This is the mirror image of `track_labels`'
+                            // own `rounded_bl` above: this area sits at the
+                            // panel's right edge, so only its bottom-
+                            // *right* corner is an outer panel corner.
+                            .rounded_br(theme::RADIUS_MD)
                             .on_scroll(cx.listener(|this, ev: &ScrollEvent, window, cx| {
                                 let delta = ev.delta.pixel_delta(px(ROW_H));
                                 this.scroll_x -= f32::from(delta.x);

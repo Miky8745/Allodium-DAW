@@ -33,6 +33,14 @@ pub struct Channel {
     pub volume: f64,
     /// `0` = routed straight to Master; otherwise a `MixerTrack` id.
     pub mixer_track: u32,
+    /// Packed `0xRRGGBB` tinting the Channel Rack's sample-name box —
+    /// ports Allodium-tauri's own `channel.color` (its `ChannelRow.svelte`
+    /// right-click "Recolor"/"Recolor randomly"). `0` = no tint, the same
+    /// numeric-sentinel convention `mixer_track` above uses — not
+    /// `Option<u32>`, per this file's own top-of-file note on why numeric
+    /// fields here use a sentinel rather than `Option`.
+    #[serde(default)]
+    pub color: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -240,6 +248,7 @@ mod tests {
             pan: 0.5,
             volume: 0.8,
             mixer_track: 0,
+            color: 0,
         });
         project.content.items.push(PatternContentEntry {
             pattern_id: 1,

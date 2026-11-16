@@ -249,6 +249,13 @@ impl Render for Mixer {
             .size_full()
             .overflow_hidden()
             .bg(theme::BG_APP)
+            // Rounds its own bottom corners to match the floating panel's
+            // outer rounded edge — GPUI's overflow clip is a plain
+            // rectangle, so without this, this square-cornered full-size
+            // background would show past the panel's rounded corner
+            // instead of being clipped to it (see `floating_panel.rs`'s
+            // own note on the same limitation).
+            .rounded_b(theme::RADIUS_MD)
             .font_family(theme::FONT_UI)
             .text_color(theme::accent_dim())
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {

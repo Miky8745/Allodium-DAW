@@ -1,5 +1,6 @@
 mod audio;
 mod channel_rack;
+mod color_utils;
 mod floating_panel;
 mod mixer;
 mod perf;
@@ -10,6 +11,7 @@ mod project;
 mod shell;
 mod theme;
 mod toolbar;
+mod widgets;
 
 use std::sync::Arc;
 use std::time::Duration;

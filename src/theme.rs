@@ -21,6 +21,16 @@ pub const BG_PILL: Hsla = Hsla { h: 230.0 / 360.0, s: 0.12, l: 0.25, a: 0.8 };
 pub const BG_PILL_HOVER: Hsla = Hsla { h: 228.0 / 360.0, s: 0.06, l: 0.52, a: 0.8 }; // rgba(124,129,140,0.8)
 pub const BG_PILL_ACTIVE: Hsla = Hsla { h: 228.0 / 360.0, s: 0.10, l: 0.35, a: 0.85 }; // rgba(78,82,99,0.85)
 
+// Channel Rack step-sequencer off-state fills, ported straight from
+// Allodium-tauri's `ChannelRow.svelte` `.step--grey`/`.step--orange`
+// (the two alternating 4-step beat-group colors). Deliberately their own
+// constants rather than reusing `BG_PANEL`/`BG_PILL`: those are the
+// floating panel's own background fill, and an off step rendered in
+// that exact color is invisible against it until hovered — the bug this
+// is fixing.
+pub const STEP_OFF_GREY: Hsla = Hsla { h: 229.0 / 360.0, s: 0.103, l: 0.21, a: 1.0 }; // #30323b
+pub const STEP_OFF_ORANGE: Hsla = Hsla { h: 25.0 / 360.0, s: 0.394, l: 0.129, a: 1.0 }; // #2e1f14
+
 // Pulled straight from Allodium-tauri's `src/app.css` — the toolbar/
 // panel-chrome port (docs/mockups/toolbar-preferences-concept.html) draws
 // a distinction the waybar-matched tokens above don't: a slightly darker

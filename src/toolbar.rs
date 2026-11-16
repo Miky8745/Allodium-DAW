@@ -203,22 +203,13 @@ fn toggle(
     on_click: impl Fn(&mut AppShell, &gpui::ClickEvent, &mut Window, &mut Context<AppShell>) + 'static,
     cx: &mut Context<AppShell>,
 ) -> impl IntoElement {
-    let id: gpui::ElementId = id.into();
     let value = value.into();
-    div()
-        .id(id.clone())
-        .w(px(28.0))
-        .h(px(26.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(theme::RADIUS_XS)
-        .cursor_pointer()
-        .text_color(if active { color } else { theme::BTN_TEXT })
-        .when(active, |d| d.bg(color.alpha(0.1)).shadow(glow(color)))
-        .hover(|s| if active { s } else { s.bg(theme::BTN_HOVER).text_color(theme::MAIN_TEXT) })
-        .child(Icon::new(icon).small())
-        .on_click(cx.listener(on_click))
+    // The base button (size, colors, hover) is `widgets::icon_toggle`;
+    // this layers on the toolbar-specific glow and the hover-info wiring
+    // (`shell.toolbar.hover`) that a context-agnostic shared widget can't
+    // know about.
+    crate::widgets::icon_toggle(id, icon, active, color, 28.0, 26.0, cx.listener(on_click))
+        .when(active, |d| d.shadow(glow(color)))
         .on_hover(cx.listener(move |shell, hovering: &bool, _, cx| {
             if *hovering {
                 shell.toolbar.hover = Some((name, value.clone()));
