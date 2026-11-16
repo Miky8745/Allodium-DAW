@@ -10,12 +10,23 @@
 //! Binding PipeWire's native API directly is a much larger dependency
 //! than one toolbar meter justifies, so this instead shells out to
 //! `pw-record`, which ships with PipeWire itself and already exists on
-//! this machine (confirmed interactively: `pw-record --target <default
-//! sink> -P media.class=Stream/Input/Audio -a --format f32 --rate 44100
-//! --channels 2 -` captures the sink's monitor and was verified end to
-//! end against a real test tone before writing this). Its raw stdout
-//! feeds the exact same `MeterState` the DAW's own mix already uses —
-//! same peak decay, same scope ring buffer, just a second instance.
+//! this machine. Its raw stdout feeds the exact same `MeterState` the
+//! DAW's own mix already uses — same peak decay, same scope ring buffer,
+//! just a second instance.
+//!
+//! Getting a loopback (as opposed to microphone) capture out of
+//! `pw-record` needs one property most examples online skip:
+//! `stream.capture.sink=true`. Without it, `--target <sink>` alone is
+//! silently ignored — the session manager still auto-links a plain
+//! `media.class=Stream/Input/Audio` stream to the default *source* (the
+//! mic), target or no target. Caught by an actual user report ("you're
+//! capturing the microphone"), then confirmed directly with `pw-link -l`
+//! while a `pw-record` invocation missing the property was running: it
+//! showed `pw-record:input_FL/FR` linked from
+//! `alsa_input....:capture_FL/FR`. Adding `stream.capture.sink=true` to
+//! the `-P` properties and re-checking the same way showed the expected
+//! link instead, from `alsa_output....:monitor_FL/FR` — the sink's own
+//! loopback monitor ports.
 //!
 //! Requires PipeWire's command-line tools on `PATH`. On a system without
 //! them (pure PulseAudio, pure ALSA, a different OS entirely), starting
@@ -76,8 +87,20 @@ impl SystemCapture {
             .args([
                 "--target",
                 &sink,
+                // `media.class=Stream/Input/Audio` alone isn't enough: the
+                // session manager still auto-links a plain Input/Audio
+                // stream to the default *source* (the microphone),
+                // ignoring `--target` entirely — confirmed interactively
+                // via `pw-link -l` while this was running, which showed
+                // `pw-record:input_FL/FR` connected to
+                // `alsa_input....:capture_FL/FR`, not the sink at all.
+                // `stream.capture.sink=true` is the documented PipeWire
+                // property that tells it "link this to the *target's
+                // monitor* ports" instead — re-checked the same way after
+                // adding it, which showed the expected
+                // `alsa_output....:monitor_FL/FR` link.
                 "-P",
-                "media.class=Stream/Input/Audio",
+                "{ media.class=Stream/Input/Audio stream.capture.sink=true }",
                 "--format",
                 "f32",
                 "--rate",

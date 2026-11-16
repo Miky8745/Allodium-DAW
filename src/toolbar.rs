@@ -39,8 +39,6 @@
 //! this codebase) and the Explorer panel toggle (no file-browser panel
 //! exists yet — MVP item #8, still unbuilt).
 
-use std::sync::Arc;
-
 use gpui::assets::IconName;
 use gpui::component::button::{Button, ButtonVariants, Toggle, ToggleGroup, ToggleVariants};
 use gpui::component::input::Input;
@@ -51,9 +49,6 @@ use gpui::{
     BoxShadow, ClickEvent, Context, Hsla, IntoElement, MouseButton, MouseDownEvent, Modifiers,
     ParentElement, ScrollEvent, Styled, Window, div, point, prelude::*, px,
 };
-use rustfft::num_complex::Complex32;
-
-use crate::audio;
 use crate::floating_panel::PanelKind;
 use crate::preferences;
 use crate::shell::AppShell;
@@ -81,7 +76,6 @@ const WAVE_GAIN_FLOOR: f32 = 0.04;
 // units below.
 const FREQ_RELEASE: f32 = 0.965;
 const FREQ_GAIN_FLOOR: f32 = 0.02;
-const SPECTRUM_BARS: usize = 44;
 
 pub struct ToolbarState {
     /// Name/value of the last-hovered toolbar control — mirrors the
@@ -122,40 +116,49 @@ pub struct ToolbarState {
     /// floor on a monitor-source switch ("switching source rescales from
     /// scratch", ported verbatim from that file's own comment).
     wave_gain: f32,
-    /// Which of the two views the audio monitor shows — click toggles it
-    /// (`Toolbar.svelte`'s own `BlackBox` behavior: "click for spectrum
-    /// analyzer" / "click for oscilloscope").
+    /// Which of the three views the audio monitor shows — click cycles
+    /// through all three (`Toolbar.svelte`'s own `BlackBox` behavior,
+    /// extended with a third mode of its own: this app's XY/Lissajous
+    /// oscilloscope has no original counterpart to port).
     monitor_mode: MonitorMode,
     /// `spectrogram`'s autoscale ceiling — the spectrum-analyzer
     /// equivalent of `wave_gain`, see `FREQ_RELEASE`/`FREQ_GAIN_FLOOR`.
+    /// The actual FFT no longer runs here at all — see
+    /// `audio::spawn_spectrum_worker`'s doc comment for why — so this is
+    /// the only per-frame spectrum state left on the render path.
     freq_gain: f32,
-    /// Built once (planning an FFT has real setup cost — re-running it
-    /// every render, dozens of times a second, would be wasted work) and
-    /// reused by every `spectrogram` call.
-    fft: Arc<dyn rustfft::Fft<f32>>,
-    /// Throttles how often `spectrogram`'s FFT actually re-runs (every
-    /// `SPECTRUM_UPDATE_EVERY`th render) — measured on this machine: an
-    /// *idle* 1024-point FFT call costs single-digit microseconds by its
-    /// own clock, yet having run it at all somehow costs the next ~60ms
-    /// of wall time overall (confirmed by isolating every other stage;
-    /// none of them account for the gap). The closest explanation is a
-    /// SIMD frequency/power-state transition tax that isn't visible to
-    /// `Instant` timing around the call itself — a known class of issue
-    /// with AVX-heavy code on some CPUs, not something `rustfft`'s own
-    /// numbers being fast rules out. A ~15-20Hz update rate (rather than
-    /// recomputing every render) is still visually live for a spectrum
-    /// display and cuts however-many-times-a-second this cost is paid
-    /// without changing anything about the computation itself.
-    spectrum_frame: u32,
-    cached_spectrum_bins: Vec<f32>,
+    /// The XY oscilloscope's autoscale ceiling — same fast-attack/slow-
+    /// release shape as `wave_gain`, but tracked separately and applied
+    /// identically to both axes (never two independent gains), so the
+    /// plotted shape scales but never distorts/stretches.
+    xy_gain: f32,
 }
-
-const SPECTRUM_UPDATE_EVERY: u32 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MonitorMode {
     Oscilloscope,
+    Xy,
     Spectrum,
+}
+
+impl MonitorMode {
+    /// Click-to-cycle order: oscilloscope -> XY -> spectrum -> back to
+    /// oscilloscope.
+    fn next(self) -> Self {
+        match self {
+            MonitorMode::Oscilloscope => MonitorMode::Xy,
+            MonitorMode::Xy => MonitorMode::Spectrum,
+            MonitorMode::Spectrum => MonitorMode::Oscilloscope,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            MonitorMode::Oscilloscope => "Oscilloscope",
+            MonitorMode::Xy => "Oscilloscope (2D)",
+            MonitorMode::Spectrum => "Spectrum analyzer",
+        }
+    }
 }
 
 impl Default for ToolbarState {
@@ -178,9 +181,7 @@ impl Default for ToolbarState {
             wave_gain: WAVE_GAIN_FLOOR,
             monitor_mode: MonitorMode::Oscilloscope,
             freq_gain: FREQ_GAIN_FLOOR,
-            fft: rustfft::FftPlanner::new().plan_fft_forward(audio::FFT_LEN),
-            spectrum_frame: 0,
-            cached_spectrum_bins: vec![0.0; SPECTRUM_BARS],
+            xy_gain: WAVE_GAIN_FLOOR,
         }
     }
 }
@@ -324,29 +325,93 @@ fn tempo_step_btn(id: impl Into<gpui::ElementId>, icon: IconName, delta: f64, cx
 /// dependency and bucketing logic this pass didn't take on — so this
 /// only ever shows the oscilloscope.
 fn oscilloscope(samples: Vec<f32>) -> impl IntoElement {
-    // A bar waveform (per-chunk peak amplitude), not a traced polyline.
-    // The first version used `canvas` + `PathBuilder::stroke` to draw an
-    // actual connected line, which measured fine on paper but cost ~100ms/
-    // frame on this machine's GPU backend once it was actually painting
-    // every frame (continuous redraw already running for the playhead) —
-    // tanked the whole app from ~35fps to ~7fps. Plain divs, the same
-    // approach every other per-frame-redrawn view in this app already
-    // uses (step grids, pattern blocks), measured back at baseline.
-    const BARS: usize = 22;
-    let chunk = (samples.len() / BARS).max(1);
+    // A real traced waveform — Allodium-tauri's own `BlackBox.svelte`
+    // `drawWave`'s `moveTo`/`lineTo` polyline through each sample's actual
+    // signed deviation, not an abs-amplitude bar chart (which reads as a
+    // level meter, not a waveform). The first version here used `canvas` +
+    // `PathBuilder::stroke` for a literal connected line, which cost
+    // ~100ms/frame on this machine's GPU backend once it painted every
+    // frame — tanked the whole app from ~35fps to ~7fps (see the
+    // following commit's follow-up for the fix that replaced it with
+    // plain bars, which fixed the framerate but lost the actual waveform
+    // shape in the process). This instead "connects the dots" with plain
+    // `div`s: one thin absolutely-positioned bar per step spanning from
+    // one sample's y to the next's, so consecutive segments' edges align
+    // into a continuous (staircase, not diagonal, but visually
+    // indistinguishable at this pixel density) trace — same per-div cost
+    // the old bar chart (and the playlist's per-frame block layer) already
+    // paid, with no canvas/path involved.
+    //
+    // Plots every sample in `samples` (no display-side subsampling) —
+    // an earlier version here picked only 64 evenly-spaced samples out
+    // of the buffer's full length, which is itself a ~16x decimation
+    // (matching, coincidentally, the exact decimation factor a since-
+    // removed audio-thread-side buffer used to apply) and showed up as
+    // a visibly "bit-crushed" jagged trace on a user-reported pure sine
+    // tone. `samples` is `ChannelRack::{,system_}scope_snapshot`'s raw,
+    // non-decimated window (`audio::FFT_LEN` long, ~23ms) — the same
+    // buffer the spectrum analyzer FFTs — so every segment here reflects
+    // an actual consecutive sample pair, matching the original's canvas
+    // trace (which maps its own full, non-decimated `fftSize` window
+    // across the canvas the same way).
+    const WIDTH: f32 = 90.0;
+    const HEIGHT: f32 = 30.0;
+    let n = samples.len().max(1);
+    let y_at = |v: f32| HEIGHT / 2.0 - v.clamp(-1.0, 1.0) * (HEIGHT / 2.0 - 1.0);
+    let dx = WIDTH / (n - 1).max(1) as f32;
     div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(1.0))
-        .w(px(90.0))
-        .h(px(30.0))
-        .children((0..BARS).map(|i| {
-            let start = (i * chunk).min(samples.len());
-            let end = (start + chunk).min(samples.len());
-            let peak = samples.get(start..end).map(|s| s.iter().fold(0.0f32, |m, v| m.max(v.abs()))).unwrap_or(0.0);
-            let h = (peak.clamp(0.0, 1.0) * 26.0).max(2.0);
-            div().w(px(2.0)).h(px(h)).rounded(px(1.0)).bg(theme::accent())
+        .relative()
+        .w(px(WIDTH))
+        .h(px(HEIGHT))
+        .children((0..n.saturating_sub(1)).map(move |i| {
+            let (y0, y1) = (y_at(samples[i]), y_at(samples[i + 1]));
+            let top = y0.min(y1);
+            let h = (y0 - y1).abs().max(1.0);
+            div().absolute().left(px(i as f32 * dx)).top(px(top)).w(px(dx.max(1.0))).h(px(h)).bg(theme::accent())
+        }))
+}
+
+/// The XY ("2D") oscilloscope — plots `(l[i], r[i])` as a point per
+/// frame instead of amplitude-over-time, the way an actual X-Y
+/// oscilloscope (two channels driving its horizontal/vertical deflection
+/// instead of one channel driving a time sweep) reads a stereo signal.
+/// This is what makes "oscilloscope music" — tracks specifically
+/// authored so their two channels trace a recognizable shape on a
+/// scope — show up correctly instead of as two independent, individually
+/// meaningless waveforms. No original counterpart in Allodium-tauri to
+/// port; this mode doesn't exist there.
+///
+/// Same reasoning as `oscilloscope` for *how* it's drawn (many small
+/// `div`s, no canvas/path — that's the thing that cost ~100ms/frame on
+/// this GPU backend), but connecting consecutive points with straight
+/// segments the way `oscilloscope` does doesn't translate: there, `x`
+/// only ever increases with `i`, so a vertical connector bar always
+/// reached the next point. Here both axes move independently per step,
+/// which a plain axis-aligned `div` can't trace diagonally. Instead this
+/// plots every sample as its own small dot — dense enough (one per
+/// `audio::FFT_LEN` sample, same ~23ms window `oscilloscope` uses) that
+/// consecutive dots overlap and the path reads as continuous, the same
+/// way a real CRT's persistence blurs a fast-moving beam's individual
+/// positions into a solid trace.
+fn xy_oscilloscope(l: &[f32], r: &[f32]) -> impl IntoElement {
+    const WIDTH: f32 = 90.0;
+    const HEIGHT: f32 = 30.0;
+    const DOT: f32 = 2.0;
+    // One shared scale for both axes (the caller's `xy_gain` already
+    // normalized `l`/`r` to -1..1 using one ceiling) — using `HEIGHT`,
+    // the smaller of the two dimensions, so the plotted shape never
+    // exceeds the box vertically and stays circular rather than
+    // stretched into an ellipse.
+    let scale = HEIGHT / 2.0 - DOT;
+    let n = l.len().min(r.len());
+    div()
+        .relative()
+        .w(px(WIDTH))
+        .h(px(HEIGHT))
+        .children((0..n).map(move |i| {
+            let x = WIDTH / 2.0 + l[i].clamp(-1.0, 1.0) * scale;
+            let y = HEIGHT / 2.0 - r[i].clamp(-1.0, 1.0) * scale;
+            div().absolute().left(px(x - DOT / 2.0)).top(px(y - DOT / 2.0)).w(px(DOT)).h(px(DOT)).rounded(px(1.0)).bg(theme::accent())
         }))
 }
 
@@ -385,56 +450,38 @@ fn lin_to_db(level: f32) -> f32 {
     20.0 * level.max(1e-4).log10()
 }
 
-/// Real linear-amplitude magnitude per positive-frequency FFT bin (length
-/// `samples.len() / 2`, DC..Nyquist) — a Hann-windowed (reduces spectral
-/// leakage into neighboring bins) forward FFT via the cached plan in
-/// `fft`, normalized by `len/2` so a full-scale sinusoid's own bin reads
-/// back out at roughly its original time-domain amplitude (the same
-/// units `wave_gain`'s floor is already calibrated against).
-fn spectrum_magnitude(samples: &[f32], fft: &dyn rustfft::Fft<f32>) -> Vec<f32> {
-    let n = samples.len();
-    let mut buf: Vec<Complex32> = samples
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            // Hann window.
-            let w = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (n - 1) as f32).cos();
-            Complex32::new(s * w, 0.0)
-        })
-        .collect();
-    fft.process(&mut buf);
-    let norm = n as f32 / 2.0;
-    buf[..n / 2].iter().map(|c| c.norm() / norm).collect()
-}
-
-/// Maps bar `i` of `bar_count` onto a bin index, exponentially rather
-/// than linearly — Allodium-tauri's own `binEdge`, ported verbatim:
-/// "exponential bucket edges so low frequencies (where most musical
-/// energy sits) get more than the first pixel or two of a linear
-/// bin->pixel map."
-fn bin_edge(bar: usize, bar_count: usize, bins: usize) -> usize {
-    let frac = bar as f32 / bar_count as f32;
-    (bins as f32).powf(frac).round().clamp(1.0, (bins - 1) as f32) as usize
-}
-
-/// The spectrum-analyzer view — many thin bars (not a fixed handful),
-/// so with a finite number of pixels to spend it reads as continuous
-/// rather than block-like, the same way the oscilloscope's own bars do.
-fn spectrogram(bins: Vec<f32>) -> impl IntoElement {
-    let n = bins.len();
-    let bar_w = px(90.0 / SPECTRUM_BARS as f32);
+/// The spectrum-analyzer view — a continuous filled curve across
+/// frequency, not `audio::SPECTRUM_BARS`' worth of visibly separate
+/// rectangles. `bins` arrives already exponentially bucketed into
+/// `SPECTRUM_BARS` real FFT-derived values by the background spectrum
+/// worker (that bucketing stays — it's what gives low frequencies more
+/// than a pixel or two of width); this just resamples those `SPECTRUM_
+/// BARS` values up to `COLUMNS` thin bottom-anchored bars via linear
+/// interpolation between neighboring bins, the same "more, thinner
+/// segments read as one continuous shape instead of blocks" trick
+/// `oscilloscope` uses for the waveform trace, applied here as a filled
+/// area instead of a centered line.
+fn spectrogram(bins: &[f32]) -> impl IntoElement {
+    const WIDTH: f32 = 90.0;
+    const HEIGHT: f32 = 30.0;
+    const COLUMNS: usize = 90;
+    let n = bins.len().max(1);
+    let height_at = move |column: usize| {
+        let pos = column as f32 / (COLUMNS - 1).max(1) as f32 * (n - 1) as f32;
+        let i0 = pos.floor() as usize;
+        let i1 = (i0 + 1).min(n - 1);
+        let t = pos - i0 as f32;
+        let v0 = bins.get(i0).copied().unwrap_or(0.0);
+        let v1 = bins.get(i1).copied().unwrap_or(0.0);
+        ((v0 + (v1 - v0) * t).clamp(0.0, 1.0) * (HEIGHT - 2.0)).max(2.0)
+    };
+    let dx = WIDTH / COLUMNS as f32;
     div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(90.0))
-        .h(px(30.0))
-        .children((0..SPECTRUM_BARS).map(|i| {
-            let lo = bin_edge(i, SPECTRUM_BARS, n);
-            let hi = bin_edge(i + 1, SPECTRUM_BARS, n).max(lo + 1).min(n);
-            let peak = bins.get(lo..hi).map(|s| s.iter().cloned().fold(0.0f32, f32::max)).unwrap_or(0.0);
-            let h = (peak.clamp(0.0, 1.0) * 26.0).max(2.0);
-            div().w(bar_w).h(px(h)).bg(theme::accent())
+        .relative()
+        .w(px(WIDTH))
+        .h(px(HEIGHT))
+        .children((0..COLUMNS).map(move |i| {
+            div().absolute().left(px(i as f32 * dx)).bottom_0().w(px(dx.max(1.0))).h(px(height_at(i))).bg(theme::accent())
         }))
 }
 
@@ -521,6 +568,7 @@ impl AppShell {
             self.toolbar.peak_env = (0.0, 0.0);
             self.toolbar.wave_gain = WAVE_GAIN_FLOOR;
             self.toolbar.freq_gain = FREQ_GAIN_FLOOR;
+            self.toolbar.xy_gain = WAVE_GAIN_FLOOR;
         }
         let (raw_scope, raw_peak, monitor_error) = match monitor_source {
             preferences::MonitorSource::Daw => (cr.scope_snapshot(), cr.peak_levels(), None),
@@ -547,27 +595,37 @@ impl AppShell {
                 let scope_samples: Vec<f32> = raw_scope.iter().map(|s| (s * wave_scale).clamp(-1.0, 1.0)).collect();
                 oscilloscope(scope_samples).into_any_element()
             }
+            MonitorMode::Xy => {
+                let (raw_l, raw_r) = match monitor_source {
+                    preferences::MonitorSource::Daw => cr.xy_snapshot(),
+                    preferences::MonitorSource::System => cr.system_xy_snapshot(),
+                };
+                // One shared ceiling for both axes — see `xy_gain`'s doc
+                // comment: scaling L and R independently would stretch
+                // the plotted shape instead of just resizing it.
+                let frame_gain = raw_l.iter().chain(raw_r.iter()).fold(0.0f32, |m, v| m.max(v.abs()));
+                self.toolbar.xy_gain = if frame_gain > self.toolbar.xy_gain { frame_gain } else { self.toolbar.xy_gain * WAVE_RELEASE };
+                let xy_scale = 1.0 / self.toolbar.xy_gain.max(WAVE_GAIN_FLOOR);
+                let l: Vec<f32> = raw_l.iter().map(|s| (s * xy_scale).clamp(-1.0, 1.0)).collect();
+                let r: Vec<f32> = raw_r.iter().map(|s| (s * xy_scale).clamp(-1.0, 1.0)).collect();
+                xy_oscilloscope(&l, &r).into_any_element()
+            }
             MonitorMode::Spectrum => {
-                // The FFT itself measures in the tens of microseconds, yet
-                // actually running it visibly costs the rest of that
-                // frame's paint time (unconfirmed root cause — see
-                // `cached_spectrum_bins`'s doc comment). Throttling how
-                // often it runs, and reusing the last result on the
-                // skipped frames, keeps the spectrum view responsive
-                // without needing that root cause nailed down.
-                self.toolbar.spectrum_frame = self.toolbar.spectrum_frame.wrapping_add(1);
-                if self.toolbar.spectrum_frame % SPECTRUM_UPDATE_EVERY == 0 {
-                    let raw_fft = match monitor_source {
-                        preferences::MonitorSource::Daw => cr.fft_snapshot(),
-                        preferences::MonitorSource::System => cr.system_fft_snapshot(),
-                    };
-                    let magnitudes = spectrum_magnitude(&raw_fft, self.toolbar.fft.as_ref());
-                    let frame_gain = magnitudes.iter().cloned().fold(0.0f32, f32::max);
-                    self.toolbar.freq_gain = if frame_gain > self.toolbar.freq_gain { frame_gain } else { self.toolbar.freq_gain * FREQ_RELEASE };
-                    let fgain = self.toolbar.freq_gain.max(FREQ_GAIN_FLOOR);
-                    self.toolbar.cached_spectrum_bins = magnitudes.iter().map(|m| (m / fgain).clamp(0.0, 1.0)).collect();
-                }
-                spectrogram(self.toolbar.cached_spectrum_bins.clone()).into_any_element()
+                // The FFT itself runs on its own background thread now
+                // (`audio::spawn_spectrum_worker`), at a fixed cadence
+                // independent of render rate — this just reads the
+                // already-binned result (`SPECTRUM_BARS` atomic loads)
+                // and applies the same autoscale envelope as the
+                // oscilloscope's `wave_gain`.
+                let raw_bins = match monitor_source {
+                    preferences::MonitorSource::Daw => cr.spectrum_bins(),
+                    preferences::MonitorSource::System => cr.system_spectrum_bins(),
+                };
+                let frame_gain = raw_bins.iter().cloned().fold(0.0f32, f32::max);
+                self.toolbar.freq_gain = if frame_gain > self.toolbar.freq_gain { frame_gain } else { self.toolbar.freq_gain * FREQ_RELEASE };
+                let fgain = self.toolbar.freq_gain.max(FREQ_GAIN_FLOOR);
+                let scaled: Vec<f32> = raw_bins.iter().map(|m| (m / fgain).clamp(0.0, 1.0)).collect();
+                spectrogram(&scaled).into_any_element()
             }
         };
         // Shared by both the scope's and peak meter's hover tooltips below
@@ -895,20 +953,14 @@ impl AppShell {
                             .cursor_pointer()
                             .child(monitor_view)
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.toolbar.monitor_mode = match this.toolbar.monitor_mode {
-                                    MonitorMode::Oscilloscope => MonitorMode::Spectrum,
-                                    MonitorMode::Spectrum => MonitorMode::Oscilloscope,
-                                };
+                                this.toolbar.monitor_mode = this.toolbar.monitor_mode.next();
                                 cx.notify();
                             }))
                             .on_hover(cx.listener({
                                 let label = monitor_system_label.clone();
                                 move |shell, hovering: &bool, _, cx| {
                                     if *hovering {
-                                        let (name, next) = match monitor_mode {
-                                            MonitorMode::Oscilloscope => ("Oscilloscope", "spectrum analyzer"),
-                                            MonitorMode::Spectrum => ("Spectrum analyzer", "oscilloscope"),
-                                        };
+                                        let (name, next) = (monitor_mode.label(), monitor_mode.next().label());
                                         let value = match monitor_source {
                                             preferences::MonitorSource::Daw => format!("{name} — click for {next}"),
                                             preferences::MonitorSource::System => label.clone(),
@@ -1080,41 +1132,3 @@ fn key_badge(label: &'static str, held: bool) -> impl IntoElement {
         .child(label)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A synthetic signal, not a live capture — unlike `pw-record`'s own
-    /// round trip (checked interactively while building this, not as a
-    /// committed test: a live loopback capture on this machine showed
-    /// real low-frequency content *alongside* the test tone, which is a
-    /// property of this machine's audio chain, not something either this
-    /// function or that test could fix), this isolates `spectrum_
-    /// magnitude`'s own math from anything the audio chain might do.
-    #[test]
-    fn spectrum_magnitude_peaks_near_the_right_bin() {
-        let rate = 44_100.0f32;
-        let freq = 440.0f32;
-        let samples: Vec<f32> = (0..audio::FFT_LEN).map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / rate).sin()).collect();
-        let mut planner = rustfft::FftPlanner::new();
-        let fft = planner.plan_fft_forward(audio::FFT_LEN);
-        let mags = spectrum_magnitude(&samples, fft.as_ref());
-
-        let (peak_bin, _) = mags.iter().enumerate().fold((0, 0.0f32), |acc, (i, &m)| if m > acc.1 { (i, m) } else { acc });
-        let bin_hz = rate / audio::FFT_LEN as f32;
-        let peak_hz = peak_bin as f32 * bin_hz;
-        assert!((400.0..480.0).contains(&peak_hz), "expected the peak near 440Hz, got {peak_hz:.0}Hz");
-    }
-
-    #[test]
-    fn bin_edge_is_monotonic_and_spans_the_full_bin_range() {
-        let bins = 512;
-        let mut prev = 0;
-        for bar in 0..SPECTRUM_BARS {
-            let edge = bin_edge(bar, SPECTRUM_BARS, bins);
-            assert!(edge >= prev, "bin_edge should never go backwards (bar {bar}: {edge} < {prev})");
-            prev = edge;
-        }
-        assert_eq!(bin_edge(SPECTRUM_BARS, SPECTRUM_BARS, bins), bins - 1, "the last edge should reach the top of the bin range");
-    }
-}

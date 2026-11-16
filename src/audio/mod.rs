@@ -18,6 +18,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, mpsc};
+use std::thread;
+use std::time::Duration;
+
+use rustfft::num_complex::Complex32;
 
 use system_capture::SystemCapture;
 
@@ -347,23 +351,42 @@ struct MeterState {
     /// see that method's doc comment.
     peak_l: AtomicU32,
     peak_r: AtomicU32,
-    /// A ring buffer of the mono mix, decimated (`SCOPE_DECIMATION`) so
-    /// `SCOPE_LEN` samples span a visually useful ~tens-of-milliseconds
-    /// window instead of ~3ms of raw 44.1kHz audio — the oscilloscope's
-    /// source.
-    scope: [AtomicU32; MeterState::SCOPE_LEN],
-    scope_write: AtomicUsize,
-    /// A *non*-decimated ring buffer of the mono mix — the spectrum
-    /// analyzer's source. Needs full sample-rate resolution (decimating
-    /// it the way `scope` is would alias higher frequencies down into
-    /// lower bins with no anti-aliasing filter to prevent it); the
-    /// oscilloscope's wider, lower-resolution window is a better fit for
-    /// *that* trace, so the two don't share one buffer.
+    /// A non-decimated ring buffer of the mono mix, shared by both the
+    /// oscilloscope and the spectrum analyzer — exactly how
+    /// Allodium-tauri's own `BlackBox.svelte` reads both views off the
+    /// same `AnalyserNode` (`getByteTimeDomainData`/`getByteFrequencyData`
+    /// against one buffer). An earlier version here gave the oscilloscope
+    /// its own *decimated* (16x) ring buffer sized for "tens of
+    /// milliseconds," on the theory that the spectrum analyzer needed
+    /// full resolution but the oscilloscope didn't. That was wrong: at
+    /// 44.1kHz, 16x decimation drops the effective sample rate to
+    /// ~2.7kHz, well under Nyquist for anything above ~1.4kHz — a user
+    /// report ("a perfect sine wave shows up bit-crushed") confirmed it
+    /// visibly aliased ordinary tones into a jagged trace. Reading the
+    /// same full-rate buffer the spectrum analyzer already needed fixes
+    /// this for free and removes a whole field's worth of bookkeeping.
     fft_buf: [AtomicU32; FFT_LEN],
     fft_write: AtomicUsize,
-    /// Counts every output frame (not gated on `playing`, unlike
-    /// `samples_played`) purely to decide when `scope` next advances.
-    frame_counter: AtomicU32,
+    /// The per-channel counterpart to `fft_buf`, same write cursor (so
+    /// index `i` here and in `fft_buf` are always the same output
+    /// frame) — the toolbar's XY (Lissajous) oscilloscope's source:
+    /// plotting `(xy_l[i], xy_r[i])` as a point per frame is how an
+    /// actual X-Y oscilloscope (and "oscilloscope music," tracks
+    /// specifically authored to draw a shape when their two channels
+    /// drive a scope's X/Y inputs instead of being played as stereo
+    /// audio) reads a stereo signal. Not part of Allodium-tauri — a new
+    /// addition, not a port — so there's no original `BlackBox.svelte`
+    /// code to match here.
+    xy_l: [AtomicU32; FFT_LEN],
+    xy_r: [AtomicU32; FFT_LEN],
+    /// The spectrum analyzer's already-binned (`bin_edge`-bucketed, but
+    /// *not* autoscaled — `toolbar::ToolbarState::freq_gain` still owns
+    /// that) magnitudes, written by a dedicated background thread
+    /// (`spawn_spectrum_worker`) at its own fixed cadence, independent of
+    /// render rate. Moving the FFT off the render path entirely — rather
+    /// than throttling how often it ran there — is what actually fixed
+    /// spectrum mode's lag; see that function's doc comment.
+    spectrum_bins: [AtomicU32; SPECTRUM_BARS],
 }
 
 /// Public so `toolbar::spectrogram` can size its own `rustfft` plan to
@@ -373,19 +396,22 @@ struct MeterState {
 /// bin_edge`) to have real low-frequency resolution to work with.
 pub(crate) const FFT_LEN: usize = 1024;
 
-impl MeterState {
-    const SCOPE_LEN: usize = 160;
-    const SCOPE_DECIMATION: u32 = 16;
+/// How many bars `toolbar::spectrogram` draws — also the width of
+/// `MeterState::spectrum_bins`, since the background spectrum worker
+/// (`spawn_spectrum_worker`) now does the exponential bucketing itself
+/// (see `bin_edge`) rather than handing the render path raw FFT bins.
+pub(crate) const SPECTRUM_BARS: usize = 44;
 
+impl MeterState {
     fn new() -> Self {
         Self {
             peak_l: AtomicU32::new(0),
             peak_r: AtomicU32::new(0),
-            scope: std::array::from_fn(|_| AtomicU32::new(0)),
-            scope_write: AtomicUsize::new(0),
             fft_buf: std::array::from_fn(|_| AtomicU32::new(0)),
             fft_write: AtomicUsize::new(0),
-            frame_counter: AtomicU32::new(0),
+            xy_l: std::array::from_fn(|_| AtomicU32::new(0)),
+            xy_r: std::array::from_fn(|_| AtomicU32::new(0)),
+            spectrum_bins: std::array::from_fn(|_| AtomicU32::new(0)),
         }
     }
 
@@ -410,13 +436,10 @@ impl MeterState {
 
         let mono = (mix_l + mix_r) * 0.5;
 
-        if self.frame_counter.fetch_add(1, Ordering::Relaxed) % Self::SCOPE_DECIMATION == 0 {
-            let idx = self.scope_write.fetch_add(1, Ordering::Relaxed) % Self::SCOPE_LEN;
-            self.scope[idx].store(mono.to_bits(), Ordering::Relaxed);
-        }
-
         let fft_idx = self.fft_write.fetch_add(1, Ordering::Relaxed) % FFT_LEN;
         self.fft_buf[fft_idx].store(mono.to_bits(), Ordering::Relaxed);
+        self.xy_l[fft_idx].store(mix_l.to_bits(), Ordering::Relaxed);
+        self.xy_r[fft_idx].store(mix_r.to_bits(), Ordering::Relaxed);
     }
 
     /// The max `|sample|` seen on each channel since the *previous* call
@@ -435,18 +458,108 @@ impl MeterState {
         (l, r)
     }
 
-    /// The last `SCOPE_LEN` scope samples, oldest first.
-    fn scope_snapshot(&self) -> Vec<f32> {
-        let write = self.scope_write.load(Ordering::Relaxed);
-        (0..Self::SCOPE_LEN).map(|i| f32::from_bits(self.scope[(write + i) % Self::SCOPE_LEN].load(Ordering::Relaxed))).collect()
-    }
-
     /// The last `FFT_LEN` raw (non-decimated) samples, oldest first — the
-    /// spectrum analyzer's input window.
+    /// shared input window for both the oscilloscope and the spectrum
+    /// analyzer.
     fn fft_snapshot(&self) -> Vec<f32> {
         let write = self.fft_write.load(Ordering::Relaxed);
         (0..FFT_LEN).map(|i| f32::from_bits(self.fft_buf[(write + i) % FFT_LEN].load(Ordering::Relaxed))).collect()
     }
+
+    /// The last `FFT_LEN` `(l, r)` sample pairs, oldest first, index-
+    /// aligned with `fft_snapshot` (same write cursor) — the XY
+    /// oscilloscope's source.
+    fn xy_snapshot(&self) -> (Vec<f32>, Vec<f32>) {
+        let write = self.fft_write.load(Ordering::Relaxed);
+        let l = (0..FFT_LEN).map(|i| f32::from_bits(self.xy_l[(write + i) % FFT_LEN].load(Ordering::Relaxed))).collect();
+        let r = (0..FFT_LEN).map(|i| f32::from_bits(self.xy_r[(write + i) % FFT_LEN].load(Ordering::Relaxed))).collect();
+        (l, r)
+    }
+
+    /// Called by `spawn_spectrum_worker`'s background thread only.
+    fn write_spectrum_bins(&self, bins: &[f32]) {
+        for (slot, v) in self.spectrum_bins.iter().zip(bins) {
+            slot.store(v.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// The spectrum analyzer's most recent already-binned magnitudes —
+    /// cheap enough (`SPECTRUM_BARS` atomic loads) to call every render,
+    /// unlike the FFT that produces them.
+    fn spectrum_bins_snapshot(&self) -> Vec<f32> {
+        self.spectrum_bins.iter().map(|b| f32::from_bits(b.load(Ordering::Relaxed))).collect()
+    }
+}
+
+/// Real linear-amplitude magnitude per positive-frequency FFT bin (length
+/// `samples.len() / 2`, DC..Nyquist) — a Hann-windowed (reduces spectral
+/// leakage into neighboring bins) forward FFT via the cached plan in
+/// `fft`, normalized by `len/2` so a full-scale sinusoid's own bin reads
+/// back out at roughly its original time-domain amplitude (the same units
+/// `toolbar`'s `freq_gain` floor is calibrated against).
+pub(crate) fn spectrum_magnitude(samples: &[f32], fft: &dyn rustfft::Fft<f32>) -> Vec<f32> {
+    let n = samples.len();
+    let mut buf: Vec<Complex32> = samples
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            // Hann window.
+            let w = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (n - 1) as f32).cos();
+            Complex32::new(s * w, 0.0)
+        })
+        .collect();
+    fft.process(&mut buf);
+    let norm = n as f32 / 2.0;
+    buf[..n / 2].iter().map(|c| c.norm() / norm).collect()
+}
+
+/// Maps bar `i` of `bar_count` onto a bin index, exponentially rather than
+/// linearly — Allodium-tauri's own `binEdge`, ported verbatim: "exponential
+/// bucket edges so low frequencies (where most musical energy sits) get
+/// more than the first pixel or two of a linear bin->pixel map."
+pub(crate) fn bin_edge(bar: usize, bar_count: usize, bins: usize) -> usize {
+    let frac = bar as f32 / bar_count as f32;
+    (bins as f32).powf(frac).round().clamp(1.0, (bins - 1) as f32) as usize
+}
+
+/// Runs the spectrum analyzer's FFT on a dedicated background thread at a
+/// fixed ~30Hz cadence, decoupled from render rate entirely — the original
+/// Allodium-tauri's equivalent (`AnalyserNode`) is computed by the
+/// browser's own audio pipeline, off the UI's main thread, which is why
+/// its spectrum view never cost that app any frame time at all.
+///
+/// This rewrite's first spectrum implementation ran the FFT inline during
+/// `toolbar::render_toolbar` and only throttled *how often* (every third
+/// render) — see `PROGRESS.md`'s "click-to-switch spectrum analyzer"
+/// follow-up. That still measured 9-16fps whenever the throttled frame
+/// landed, under an unconfirmed "SIMD/AVX frequency-or-power-state
+/// transition tax" theory: the FFT call's own wall-clock cost was
+/// microseconds, yet the *frame that ran it* cost tens of milliseconds
+/// more than frames that didn't, as if running vectorized code briefly
+/// throttled the rest of that frame's GPU paint work. Whether or not
+/// that's the exact mechanism, moving the FFT off the render path
+/// entirely sidesteps it the same way the browser's `AnalyserNode` does:
+/// the render path now only ever does `SPECTRUM_BARS` atomic loads plus
+/// the existing autoscale (`toolbar::ToolbarState::freq_gain`), regardless
+/// of how expensive any given FFT call happens to be on this machine.
+fn spawn_spectrum_worker(meter: Arc<MeterState>) {
+    thread::spawn(move || {
+        let fft = rustfft::FftPlanner::new().plan_fft_forward(FFT_LEN);
+        loop {
+            thread::sleep(Duration::from_millis(33));
+            let raw = meter.fft_snapshot();
+            let magnitudes = spectrum_magnitude(&raw, fft.as_ref());
+            let n = magnitudes.len();
+            let bins: Vec<f32> = (0..SPECTRUM_BARS)
+                .map(|i| {
+                    let lo = bin_edge(i, SPECTRUM_BARS, n);
+                    let hi = bin_edge(i + 1, SPECTRUM_BARS, n).max(lo + 1).min(n);
+                    magnitudes.get(lo..hi).map(|s| s.iter().cloned().fold(0.0f32, f32::max)).unwrap_or(0.0)
+                })
+                .collect();
+            meter.write_spectrum_bins(&bins);
+        }
+    });
 }
 
 /// Sent from the UI thread into the running audio callback. Applied at
@@ -661,12 +774,16 @@ impl AudioEngine {
             .map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
 
+        let system_meter = Arc::new(MeterState::new());
+        spawn_spectrum_worker(meter.clone());
+        spawn_spectrum_worker(system_meter.clone());
+
         Ok(Self {
             _stream: stream,
             sender,
             state,
             meter,
-            system_meter: Arc::new(MeterState::new()),
+            system_meter,
             system_capture: Mutex::new(None),
             system_error: Mutex::new(None),
         })
@@ -689,15 +806,24 @@ impl AudioEngine {
     }
 
     /// The toolbar oscilloscope's most recent window of the master mix,
-    /// oldest sample first.
+    /// oldest sample first — the same raw, non-decimated buffer the
+    /// spectrum analyzer reads, so the oscilloscope renders at full
+    /// sample-rate resolution.
     pub fn scope_snapshot(&self) -> Vec<f32> {
-        self.meter.scope_snapshot()
+        self.meter.fft_snapshot()
     }
 
-    /// The toolbar spectrum analyzer's most recent (non-decimated)
-    /// window of the master mix, oldest sample first.
-    pub fn fft_snapshot(&self) -> Vec<f32> {
-        self.meter.fft_snapshot()
+    /// The toolbar XY oscilloscope's most recent `(l, r)` sample pairs,
+    /// oldest first, index-aligned with `scope_snapshot`.
+    pub fn xy_snapshot(&self) -> (Vec<f32>, Vec<f32>) {
+        self.meter.xy_snapshot()
+    }
+
+    /// The toolbar spectrum analyzer's most recent already-binned
+    /// magnitudes (`SPECTRUM_BARS` long), produced by a background thread
+    /// — see `spawn_spectrum_worker`. Cheap to call every render.
+    pub fn spectrum_bins(&self) -> Vec<f32> {
+        self.meter.spectrum_bins_snapshot()
     }
 
     /// Starts "System audio" capture (see `system_capture.rs`) if it
@@ -729,11 +855,15 @@ impl AudioEngine {
     }
 
     pub fn system_scope_snapshot(&self) -> Vec<f32> {
-        self.system_meter.scope_snapshot()
+        self.system_meter.fft_snapshot()
     }
 
-    pub fn system_fft_snapshot(&self) -> Vec<f32> {
-        self.system_meter.fft_snapshot()
+    pub fn system_xy_snapshot(&self) -> (Vec<f32>, Vec<f32>) {
+        self.system_meter.xy_snapshot()
+    }
+
+    pub fn system_spectrum_bins(&self) -> Vec<f32> {
+        self.system_meter.spectrum_bins_snapshot()
     }
 
     /// Why `start_system_capture` last failed, if it did — e.g. PipeWire's
@@ -866,6 +996,45 @@ mod song_snapshot_tests {
 
         let snapshot = build_song_snapshot(&project, &HashMap::new());
         assert_eq!(snapshot.song_length_steps, 32);
+    }
+}
+
+#[cfg(test)]
+mod spectrum_tests {
+    use super::*;
+
+    /// A synthetic signal, not a live capture — unlike `pw-record`'s own
+    /// round trip (checked interactively while building this, not as a
+    /// committed test: a live loopback capture on this machine showed
+    /// real low-frequency content *alongside* the test tone, which is a
+    /// property of this machine's audio chain, not something either this
+    /// function or that test could fix), this isolates `spectrum_
+    /// magnitude`'s own math from anything the audio chain might do.
+    #[test]
+    fn spectrum_magnitude_peaks_near_the_right_bin() {
+        let rate = 44_100.0f32;
+        let freq = 440.0f32;
+        let samples: Vec<f32> = (0..FFT_LEN).map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / rate).sin()).collect();
+        let mut planner = rustfft::FftPlanner::new();
+        let fft = planner.plan_fft_forward(FFT_LEN);
+        let mags = spectrum_magnitude(&samples, fft.as_ref());
+
+        let (peak_bin, _) = mags.iter().enumerate().fold((0, 0.0f32), |acc, (i, &m)| if m > acc.1 { (i, m) } else { acc });
+        let bin_hz = rate / FFT_LEN as f32;
+        let peak_hz = peak_bin as f32 * bin_hz;
+        assert!((400.0..480.0).contains(&peak_hz), "expected the peak near 440Hz, got {peak_hz:.0}Hz");
+    }
+
+    #[test]
+    fn bin_edge_is_monotonic_and_spans_the_full_bin_range() {
+        let bins = 512;
+        let mut prev = 0;
+        for bar in 0..SPECTRUM_BARS {
+            let edge = bin_edge(bar, SPECTRUM_BARS, bins);
+            assert!(edge >= prev, "bin_edge should never go backwards (bar {bar}: {edge} < {prev})");
+            prev = edge;
+        }
+        assert_eq!(bin_edge(SPECTRUM_BARS, SPECTRUM_BARS, bins), bins - 1, "the last edge should reach the top of the bin range");
     }
 }
 

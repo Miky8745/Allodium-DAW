@@ -15,7 +15,9 @@
 //! settings, each row saying plainly what's not implemented rather than
 //! presenting a control that looks live but silently does nothing. Like
 //! every other preference here, the monitor source itself is session-only
-//! — it resets to `Daw` on restart, the same as the rest of `Preferences`.
+//! — it resets to `System` on restart (monitoring what's actually coming
+//! out of the speakers by default), the same session-only lifetime as the
+//! rest of `Preferences`.
 
 use gpui::assets::IconName;
 use gpui::component::button::{Toggle, ToggleGroup, ToggleVariants};
@@ -41,8 +43,8 @@ enum PrefsTab {
 /// see that module for why and what happens when it isn't available).
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum MonitorSource {
-    #[default]
     Daw,
+    #[default]
     System,
 }
 

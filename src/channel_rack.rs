@@ -100,9 +100,15 @@ impl ChannelRack {
         self.engine.scope_snapshot()
     }
 
-    /// The toolbar spectrum analyzer's most recent window of the master mix.
-    pub fn fft_snapshot(&self) -> Vec<f32> {
-        self.engine.fft_snapshot()
+    /// The toolbar XY oscilloscope's most recent `(l, r)` sample pairs.
+    pub fn xy_snapshot(&self) -> (Vec<f32>, Vec<f32>) {
+        self.engine.xy_snapshot()
+    }
+
+    /// The toolbar spectrum analyzer's most recent already-binned
+    /// magnitudes of the master mix.
+    pub fn spectrum_bins(&self) -> Vec<f32> {
+        self.engine.spectrum_bins()
     }
 
     pub fn start_system_capture(&self) {
@@ -121,8 +127,12 @@ impl ChannelRack {
         self.engine.system_scope_snapshot()
     }
 
-    pub fn system_fft_snapshot(&self) -> Vec<f32> {
-        self.engine.system_fft_snapshot()
+    pub fn system_xy_snapshot(&self) -> (Vec<f32>, Vec<f32>) {
+        self.engine.system_xy_snapshot()
+    }
+
+    pub fn system_spectrum_bins(&self) -> Vec<f32> {
+        self.engine.system_spectrum_bins()
     }
 
     pub fn system_capture_error(&self) -> Option<String> {
