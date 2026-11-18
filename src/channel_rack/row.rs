@@ -7,6 +7,7 @@ use gpui::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui::{App, ClickEvent, Context, Div, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent, ParentElement, ScrollEvent, Styled, Window, div, prelude::*, px};
 
 use crate::color_utils::{contrast_text_color, hsl_to_rgb_u32};
+use crate::file_browser::SampleDragPayload;
 use crate::theme;
 use crate::widgets::{dial, scroll_field};
 
@@ -273,6 +274,13 @@ impl ChannelRack {
                 .text_size(px(11.0))
                 .text_color(if ch.color != 0 { contrast_text_color(ch.color) } else { theme::MAIN_TEXT })
                 .child(name_label)
+                // Dropping a sample dragged from the File Browser here
+                // replaces this channel's sample in place — see
+                // `ChannelRack::assign_sample`.
+                .drag_over::<SampleDragPayload>(|style, _, _, _| style.border_color(theme::accent()).bg(theme::accent().alpha(0.18)))
+                .on_drop(cx.listener(move |this, payload: &SampleDragPayload, _, cx| {
+                    this.assign_sample(id, std::path::PathBuf::from(payload.path.clone()), cx);
+                }))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, _| this.audition(id)))
                 .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                     if ev.click_count() >= 2 {

@@ -205,6 +205,17 @@ impl ChannelRack {
         else {
             return;
         };
+        self.add_channel_from_path(path, cx);
+    }
+
+    /// Shared by the `rfd` file picker (`add_channel`) and dropping a
+    /// sample from the File Browser straight onto the "+ Channel" button
+    /// (`footer.rs`) — the feature-scope brief's own "drag/drop (or at
+    /// least pick) a sample file onto a channel," the drag/drop half of
+    /// that pair now that a file-explorer panel actually exists to drag
+    /// *from* (see `channel_rack.rs`'s own top doc comment, which used to
+    /// explain why this wasn't ported yet).
+    pub(super) fn add_channel_from_path(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         let path_str = path.to_string_lossy().to_string();
         let sample = match audio::decode_sample(&path) {
             Ok(s) => s,
@@ -238,6 +249,35 @@ impl ChannelRack {
         });
 
         self.selected_channel_id = Some(id);
+        self.push_snapshot();
+        self.save();
+        cx.notify();
+    }
+
+    /// Dropping a sample from the File Browser onto an *existing* row's
+    /// sample box (`row.rs`) replaces that channel's sample in place,
+    /// rather than adding a new channel — the drop target decides which
+    /// of the two `add_channel_from_path`/`assign_sample` this becomes.
+    pub(super) fn assign_sample(&mut self, channel_id: u32, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        let path_str = path.to_string_lossy().to_string();
+        let sample = match audio::decode_sample(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[channel rack] couldn't decode {path_str}: {e}");
+                return;
+            }
+        };
+        self.samples.insert(path_str.clone(), sample);
+        let Some(ch) = self.project.channels.items.iter_mut().find(|c| c.id == channel_id) else { return };
+        // A channel with no sample yet shows as the "Drop sample"
+        // placeholder label (see `row.rs`'s own `name_label`) with no name
+        // of its own to preserve, so this is the one case an assign also
+        // picks the channel's name, same as a freshly added channel would.
+        if ch.sample_path.is_empty() {
+            ch.name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Channel".to_string());
+        }
+        ch.sample_path = path_str;
+        self.audition(channel_id);
         self.push_snapshot();
         self.save();
         cx.notify();

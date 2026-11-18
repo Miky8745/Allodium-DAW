@@ -33,7 +33,6 @@ struct PanelGeometries {
     piano_roll: PanelGeometry,
     playlist: PanelGeometry,
     mixer: PanelGeometry,
-    file_browser: PanelGeometry,
 }
 
 impl PanelGeometries {
@@ -43,7 +42,6 @@ impl PanelGeometries {
             PanelKind::PianoRoll => self.piano_roll,
             PanelKind::Playlist => self.playlist,
             PanelKind::Mixer => self.mixer,
-            PanelKind::FileBrowser => self.file_browser,
         }
     }
 
@@ -53,7 +51,6 @@ impl PanelGeometries {
             PanelKind::PianoRoll => &mut self.piano_roll,
             PanelKind::Playlist => &mut self.playlist,
             PanelKind::Mixer => &mut self.mixer,
-            PanelKind::FileBrowser => &mut self.file_browser,
         }
     }
 }
@@ -79,7 +76,6 @@ impl Default for PanelGeometries {
             piano_roll: maximized_geo(16.0, 292.0, 860.0, 270.0),
             playlist: maximized_geo(16.0, 578.0, 860.0, 220.0),
             mixer: geo(892.0, 16.0, 380.0, 500.0),
-            file_browser: geo(892.0, 532.0, 380.0, 266.0),
         }
     }
 }
@@ -90,7 +86,10 @@ pub struct AppShell {
     piano_roll: Entity<PianoRoll>,
     playlist: Entity<Playlist>,
     mixer: Entity<Mixer>,
+    /// Docked to the left edge, not a floating `PanelKind` — see
+    /// `file_browser.rs`'s own module doc for why.
     file_browser: Entity<FileBrowser>,
+    file_browser_open: bool,
     geometry: PanelGeometries,
     z_order: Vec<PanelKind>,
     drag: Option<PanelDrag>,
@@ -148,6 +147,7 @@ impl AppShell {
             playlist,
             mixer,
             file_browser,
+            file_browser_open: true,
             geometry: PanelGeometries::default(),
             z_order: PanelKind::ALL.to_vec(),
             drag: None,
@@ -268,6 +268,39 @@ impl AppShell {
         } else {
             geo
         }
+    }
+
+    /// Shows/hides the docked File Browser sidebar — a plain 2-state
+    /// toggle (unlike `toggle_panel`'s 3-state floating-window semantics),
+    /// since a dock has no z-order to raise/lower.
+    fn toggle_file_browser(&mut self, cx: &mut Context<Self>) {
+        self.file_browser_open = !self.file_browser_open;
+        cx.notify();
+    }
+
+    /// Mirrors `toggle_pill`'s visual treatment (icon-only, accent-tinted
+    /// when active) for the one dock this shell has, without reusing
+    /// `PanelKind`'s z-order-aware open/frontmost states that don't apply
+    /// to a sidebar.
+    pub(crate) fn file_browser_toggle_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.file_browser_open;
+        let mut pill = div()
+            .id("file-browser-toggle")
+            .w(px(34.0))
+            .h(px(34.0))
+            .rounded(theme::RADIUS_SM)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .child(Icon::new(crate::file_browser::ICON).small())
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_file_browser(cx)));
+        pill = if open {
+            pill.bg(crate::file_browser::IDENTITY_COLOR.alpha(0.14)).text_color(crate::file_browser::IDENTITY_COLOR)
+        } else {
+            pill.text_color(theme::BTN_TEXT).hover(|s| s.bg(theme::BTN_HOVER).text_color(theme::MAIN_TEXT))
+        };
+        pill
     }
 
     fn close_panel(&mut self, kind: PanelKind, cx: &mut Context<Self>) {
@@ -397,7 +430,9 @@ impl Render for AppShell {
             None => "Piano Roll".to_string(),
         };
 
-        let workspace_size = size(window.viewport_size().width, window.viewport_size().height - theme::TOOLBAR_TOTAL_H);
+        let dock_w = if self.file_browser_open { theme::FILE_BROWSER_DOCK_W } else { px(0.0) };
+        let workspace_size =
+            size(window.viewport_size().width - dock_w, window.viewport_size().height - theme::TOOLBAR_TOTAL_H);
 
         let available_mixer_h = self.display_geometry(PanelKind::Mixer, workspace_size).size.height - px(26.0);
         self.mixer.update(cx, |m, cx| m.set_fader_height((available_mixer_h - px(140.0)).max(px(40.0)), cx));
@@ -419,7 +454,6 @@ impl Render for AppShell {
                 PanelKind::PianoRoll => self.piano_roll.clone().into_any_element(),
                 PanelKind::Playlist => self.playlist.clone().into_any_element(),
                 PanelKind::Mixer => self.mixer.clone().into_any_element(),
-                PanelKind::FileBrowser => self.file_browser.clone().into_any_element(),
             };
             workspace = workspace.child(floating_panel::render_panel(
                 kind,
@@ -477,18 +511,34 @@ impl Render for AppShell {
             .child(self.render_toolbar(cx))
             .child(
                 div()
-                    .relative()
                     .flex_1()
                     .w_full()
+                    .flex()
+                    .flex_row()
                     .overflow_hidden()
-                    // A faint directional wash of the active accent, not a
-                    // flat fill — GPUI has no backdrop-filter/blur, so the
-                    // floating panels' translucent fill (`floating_panel.rs`)
-                    // needs *something* with visible variation behind it to
-                    // read as glass rather than just a slightly different
-                    // flat color.
-                    .bg(linear_gradient(135.0, linear_color_stop(theme::accent().alpha(0.05), 0.0), linear_color_stop(theme::CANVAS_BG, 0.5)))
-                    .child(workspace),
+                    // Docked to the left edge, IDE-style — not a floating
+                    // `PanelKind` (see `file_browser.rs`'s module doc) —
+                    // so it sits outside the workspace's own absolute-
+                    // positioned panel stack entirely, shrinking it rather
+                    // than overlapping it.
+                    .when(self.file_browser_open, |d| {
+                        d.child(div().flex_shrink_0().w(theme::FILE_BROWSER_DOCK_W).h_full().child(self.file_browser.clone()))
+                    })
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .h_full()
+                            .overflow_hidden()
+                            // A faint directional wash of the active accent, not a
+                            // flat fill — GPUI has no backdrop-filter/blur, so the
+                            // floating panels' translucent fill (`floating_panel.rs`)
+                            // needs *something* with visible variation behind it to
+                            // read as glass rather than just a slightly different
+                            // flat color.
+                            .bg(linear_gradient(135.0, linear_color_stop(theme::accent().alpha(0.05), 0.0), linear_color_stop(theme::CANVAS_BG, 0.5)))
+                            .child(workspace),
+                    ),
             )
     }
 }

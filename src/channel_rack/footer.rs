@@ -7,6 +7,7 @@ use gpui::assets::IconName;
 use gpui::component::{Icon, Sizable};
 use gpui::{ClickEvent, Context, Div, ParentElement, Styled, div, prelude::*, px};
 
+use crate::file_browser::SampleDragPayload;
 use crate::theme;
 
 use super::ChannelRack;
@@ -45,7 +46,14 @@ impl ChannelRack {
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::BTN_HOVER).text_color(theme::MAIN_TEXT))
                     .child(Icon::new(IconName::Plus).xsmall())
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.add_channel(cx))),
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.add_channel(cx)))
+                    // Dropping a sample dragged from the File Browser here
+                    // creates a new channel from it, same as the `rfd`
+                    // file picker this button already opens on a click.
+                    .drag_over::<SampleDragPayload>(|style, _, _, _| style.border_color(theme::accent()).bg(theme::accent().alpha(0.18)))
+                    .on_drop(cx.listener(|this, payload: &SampleDragPayload, _, cx| {
+                        this.add_channel_from_path(std::path::PathBuf::from(payload.path.clone()), cx);
+                    })),
             )
             .child(
                 div()

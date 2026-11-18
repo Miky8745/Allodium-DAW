@@ -9,6 +9,7 @@ mod piano_roll;
 mod playlist;
 mod preferences;
 mod project;
+mod sample_downloader;
 mod shell;
 mod theme;
 mod toolbar;

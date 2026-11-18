@@ -1,10 +1,15 @@
-//! Generic floating-window chrome shared by the four panels (Channel
-//! Rack, Piano Roll, Playlist, Mixer). None of those views know they're
-//! floating — this module just wraps whatever they render in a
+//! Generic floating-window chrome shared by the four floating panels
+//! (Channel Rack, Piano Roll, Playlist, Mixer). None of those views know
+//! they're floating — this module just wraps whatever they render in a
 //! draggable/resizable/closable/focusable frame. See
 //! `docs/stage-08-visual-redesign.md` for the design rationale (niri's
 //! own flat, border-only-when-focused window convention, deliberately
 //! not the original app's drop-shadow "SaaS card" look).
+//!
+//! The File Browser is **not** one of these — it's docked to the left
+//! edge of the shell instead (see `shell.rs`), matching every ordinary
+//! IDE's file tree rather than floating like a tool window. See
+//! `file_browser.rs`'s own module doc for why.
 
 use gpui::assets::IconName;
 use gpui::component::{Icon, Sizable};
@@ -53,12 +58,10 @@ pub enum PanelKind {
     PianoRoll,
     Playlist,
     Mixer,
-    FileBrowser,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 5] =
-        [PanelKind::ChannelRack, PanelKind::PianoRoll, PanelKind::Playlist, PanelKind::Mixer, PanelKind::FileBrowser];
+    pub const ALL: [PanelKind; 4] = [PanelKind::ChannelRack, PanelKind::PianoRoll, PanelKind::Playlist, PanelKind::Mixer];
 
     /// A real vector icon (the bundled Lucide catalog — see
     /// `gpui::assets::AllAssets` registered in `main.rs`) rather than a
@@ -70,7 +73,6 @@ impl PanelKind {
             PanelKind::PianoRoll => IconName::Piano,
             PanelKind::Playlist => IconName::ListMusic,
             PanelKind::Mixer => IconName::SlidersVertical,
-            PanelKind::FileBrowser => IconName::Folder,
         }
     }
 
@@ -80,7 +82,6 @@ impl PanelKind {
             PanelKind::PianoRoll => "Piano Roll",
             PanelKind::Playlist => "Playlist",
             PanelKind::Mixer => "Mixer",
-            PanelKind::FileBrowser => "File Browser",
         }
     }
 
@@ -96,7 +97,6 @@ impl PanelKind {
             PanelKind::PianoRoll => Hsla { h: 175.0 / 360.0, s: 0.50, l: 0.62, a: 1.0 }, // teal
             PanelKind::Playlist => Hsla { h: 335.0 / 360.0, s: 0.60, l: 0.68, a: 1.0 }, // rose
             PanelKind::Mixer => Hsla { h: 145.0 / 360.0, s: 0.40, l: 0.62, a: 1.0 }, // sage
-            PanelKind::FileBrowser => Hsla { h: 45.0 / 360.0, s: 0.55, l: 0.66, a: 1.0 }, // gold
         }
     }
 }

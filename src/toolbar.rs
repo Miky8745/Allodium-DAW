@@ -1019,17 +1019,10 @@ impl AppShell {
                             ),
                     )
                     .child(vsep())
-                    .child(self.toggle_pill(PanelKind::FileBrowser, cx))
+                    .child(self.file_browser_toggle_pill(cx))
                     .child({
                         let mut pills = div().flex().gap_1();
                         for kind in PanelKind::ALL {
-                            if kind == PanelKind::FileBrowser {
-                                // Already has its own dedicated slot just
-                                // above, ahead of the generic pill cluster
-                                // — the slot the inert "Not built yet"
-                                // placeholder used to occupy.
-                                continue;
-                            }
                             pills = pills.child(self.toggle_pill(kind, cx));
                         }
                         pills

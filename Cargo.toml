@@ -18,6 +18,10 @@ rfd = "0.15"
 # The toolbar's spectrum-analyzer mode (`toolbar::spectrogram`) — a real
 # FFT, not a hand-rolled DFT; rustfft is the standard pure-Rust choice.
 rustfft = "6"
+# The File Browser's "Download Default Samples" button (`sample_downloader.rs`)
+# — a plain blocking HTTPS GET on its own background thread, default
+# features (pure-Rust rustls, no system OpenSSL dependency).
+ureq = "2"
 
 [profile.dev]
 opt-level = 1

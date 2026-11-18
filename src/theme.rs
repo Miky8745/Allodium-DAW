@@ -299,6 +299,10 @@ pub const TOOLBAR_ROW_H: Pixels = px(50.0);
 /// 2.0` at each call site.
 pub const TOOLBAR_TOTAL_H: Pixels = px(100.0);
 
+/// The File Browser's docked-left-sidebar width (`shell.rs`) — fixed, not
+/// user-resizable yet, same scope cut as everything else in that stage.
+pub const FILE_BROWSER_DOCK_W: Pixels = px(260.0);
+
 /// The desktop's actual installed/used font — confirmed via a direct
 /// config audit (waybar, swaync, wlogout, alacritty all pin this exact
 /// name). The earlier "JetBrains Mono" guess was wrong: that family isn't
