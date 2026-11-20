@@ -8,22 +8,51 @@ use gpui::{App, ClickEvent, Context, Div, Entity, Focusable, IntoElement, MouseB
 
 use crate::color_utils::{contrast_text_color, hsl_to_rgb_u32};
 use crate::file_browser::SampleDragPayload;
+use crate::project::{Note, STEP_PITCH};
 use crate::theme;
 use crate::widgets::{dial, scroll_field};
 
 use super::drag::ParamKind;
 use super::{ChannelRack, STEP_COUNT};
 
+/// Same per-entry-unique-id scheme as `piano_roll.rs`'s own `next_note_id`
+/// — duplicated rather than shared, since each is private to its own
+/// module and the two have no other reason to depend on each other.
+fn next_note_id(notes: &[Note]) -> u32 {
+    notes.iter().map(|n| n.id).max().unwrap_or(0) + 1
+}
+
+/// Whether a step-shaped note (the step sequencer's own domain: fixed
+/// pitch, exactly one step long) sits at `step` — used both to light up
+/// the step button and to find/remove it on toggle-off. Doesn't touch an
+/// arbitrary piano-roll note of a different pitch/length that happens to
+/// start at the same step; see `set_step`'s doc comment.
+fn step_note_index(notes: &[Note], step: usize) -> Option<usize> {
+    notes.iter().position(|n| n.pitch == STEP_PITCH && n.length == 1.0 && n.start as usize == step)
+}
+
 impl ChannelRack {
     /// Left/right mousedown on a step button set it on/off explicitly
     /// (rather than toggling) — Allodium-tauri's own `stepMousedown`: left
     /// always activates (and auditions), right always erases, so a quick
     /// left-right flick never leaves a step in the wrong state the way a
-    /// plain toggle could.
+    /// plain toggle could. A step is just a `Note { pitch: STEP_PITCH,
+    /// length: 1.0, .. }` — the step row and the Piano Roll are the same
+    /// backend, so this only ever touches a note matching that exact
+    /// shape, never an arbitrary note drawn in the Piano Roll that happens
+    /// to start at the same step.
     fn set_step(&mut self, channel_id: u32, step: usize, active: bool, cx: &mut Context<Self>) {
         let entry = self.content_for(channel_id);
-        if let Some(on) = entry.steps.get_mut(step) {
-            *on = active;
+        let existing = step_note_index(&entry.notes, step);
+        match (active, existing) {
+            (true, None) => {
+                let id = next_note_id(&entry.notes);
+                entry.notes.push(Note { id, pitch: STEP_PITCH, start: step as f64, length: 1.0, velocity: 1.0 });
+            }
+            (false, Some(idx)) => {
+                entry.notes.remove(idx);
+            }
+            _ => {}
         }
         if active {
             self.audition(channel_id);
@@ -34,11 +63,16 @@ impl ChannelRack {
     }
 
     /// Fills every Nth step (0, N, 2N, …), clearing the rest — the row
-    /// context menu's "Fill every N steps" (N = 2/4/8).
+    /// context menu's "Fill every N steps" (N = 2/4/8). Only ever adds/
+    /// removes step-shaped notes (see `set_step`'s doc comment); any other
+    /// note the Piano Roll drew for this channel is untouched.
     fn fill_every(&mut self, channel_id: u32, n: usize, cx: &mut Context<Self>) {
         let entry = self.content_for(channel_id);
-        for (i, step) in entry.steps.iter_mut().enumerate() {
-            *step = i % n == 0;
+        entry.notes.retain(|note| !(note.pitch == STEP_PITCH && note.length == 1.0 && (note.start as usize) < STEP_COUNT));
+        let mut next_id = next_note_id(&entry.notes);
+        for i in (0..STEP_COUNT).step_by(n) {
+            entry.notes.push(Note { id: next_id, pitch: STEP_PITCH, start: i as f64, length: 1.0, velocity: 1.0 });
+            next_id += 1;
         }
         self.push_snapshot();
         self.save();
@@ -193,23 +227,24 @@ impl ChannelRack {
         cx: &mut Context<Self>,
     ) -> Div {
         let ch = self.project.channels.items.iter().find(|c| c.id == id).unwrap().clone();
-        let steps = self
+        let notes = self
             .project
             .content
             .items
             .iter()
             .find(|e| e.pattern_id == pattern_id && e.channel_id == id)
-            .map(|e| e.steps.clone())
-            .unwrap_or_else(|| vec![false; STEP_COUNT]);
+            .map(|e| e.notes.clone())
+            .unwrap_or_default();
 
         let mut step_row = div().flex().flex_row().gap_1();
-        for (i, on) in steps.iter().enumerate().take(STEP_COUNT) {
+        for i in 0..STEP_COUNT {
+            let on = step_note_index(&notes, i).is_some();
             let is_current = playing && current_step == i as i64;
             // 4-step beat-group banding, matching the Piano Roll's own
             // beat-group shading — the two grids should read as one
             // system, not two unrelated ones.
             let in_even_group = (i / 4) % 2 == 0;
-            let bg = match (*on, in_even_group) {
+            let bg = match (on, in_even_group) {
                 (true, _) => theme::accent(),
                 (false, true) => theme::STEP_OFF_GREY,
                 (false, false) => theme::STEP_OFF_ORANGE,

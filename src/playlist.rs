@@ -15,9 +15,33 @@ use gpui::{
     prelude::*, px, quad, rgb, size,
 };
 
+use crate::audio::SampleBuffer;
 use crate::channel_rack::ChannelRack;
-use crate::project::Placement;
+use crate::file_browser::SampleDragPayload;
+use crate::project::{Note, Pattern, Placement};
 use crate::theme;
+
+/// A block's title text: a clip's own sample filename, or the referenced
+/// pattern's name. Shared by the live block layer and the dying-block
+/// fade-out layer so both agree on what a placement is called.
+fn block_label(placement: &Placement, patterns: &[Pattern]) -> String {
+    if !placement.sample_path.is_empty() {
+        std::path::Path::new(&placement.sample_path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Sample".to_string())
+    } else {
+        patterns.iter().find(|p| p.id == placement.pattern_id).map(|p| p.name.clone()).unwrap_or_default()
+    }
+}
+
+/// The content area's background — distinct from the grid's own dark fill
+/// so each block's "what's inside it" area reads as its own surface, not
+/// a continuation of the grid behind it.
+const CONTENT_BG: Hsla = Hsla { h: 0.0, s: 0.0, l: 0.14, a: 1.0 };
+/// Height of a block's title strip; the rest of `ROW_H` is the content
+/// area below it.
+const TITLE_H: f32 = 14.0;
 
 /// Not persisted — a fixed visual lane count, same as the original's own
 /// 8 hardcoded tracks (`docs/playlist.md`: "local `$state`... not a
@@ -169,7 +193,14 @@ impl Playlist {
                         return;
                     }
                     let id = self.channel_rack.update(cx, |rack, _| rack.next_placement_id());
-                    self.placements.push(Placement { id, pattern_id, track_id: track as u32, start_beat: beat });
+                    self.placements.push(Placement {
+                        id,
+                        pattern_id,
+                        track_id: track as u32,
+                        start_beat: beat,
+                        sample_path: String::new(),
+                        length_beats: 0.0,
+                    });
                     self.drag = DragMode::Moving { placement_id: id, grab_offset_beats: 0.0, grab_offset_track: 0 };
                 }
             }
@@ -214,16 +245,50 @@ impl Playlist {
     fn delete_at(&mut self, beat: f64, track: i32, cx: &mut Context<Self>) {
         if let Some(idx) = self.placement_at(beat, track, cx) {
             let placement = self.placements.remove(idx);
-            let pattern_name = self
-                .channel_rack
-                .read(cx)
-                .patterns()
-                .iter()
-                .find(|p| p.id == placement.pattern_id)
-                .map(|p| p.name.clone())
-                .unwrap_or_default();
+            let pattern_name = block_label(&placement, self.channel_rack.read(cx).patterns());
             self.dying.push(DyingPlacement { placement, pattern_name, died_at: Instant::now() });
         }
+    }
+
+    /// Drag-a-sample-straight-from-the-File-Browser-onto-the-Playlist —
+    /// creates a one-shot "clip" placement (`Placement.sample_path` non-
+    /// empty, `pattern_id` 0) the same way clicking empty grid space
+    /// creates a pattern placement, just with its length computed from
+    /// the sample's own real duration (`frame_count / sample_rate`
+    /// seconds, converted to beats at the project's current tempo) and
+    /// rounded to the nearest whole beat — matching this grid's existing
+    /// whole-beat placement granularity — instead of looked up from a
+    /// pattern.
+    fn handle_sample_drop(&mut self, payload: &SampleDragPayload, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        let (beat, track) = self.pointer_to_grid(position);
+        if track < 0 || track as u32 >= TRACK_COUNT {
+            return;
+        }
+        let path = std::path::PathBuf::from(&payload.path);
+        let sample = match self.channel_rack.update(cx, |rack, _| rack.cache_sample(&path)) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[playlist] couldn't decode '{}': {e}", payload.path);
+                return;
+            }
+        };
+        let tempo = self.channel_rack.read(cx).tempo();
+        let duration_secs = sample.frame_count() as f64 / sample.sample_rate as f64;
+        let length_beats = (duration_secs * tempo / 60.0).round().max(1.0);
+        if self.overlaps(beat, length_beats, track as u32, None, cx) {
+            return;
+        }
+        let id = self.channel_rack.update(cx, |rack, _| rack.next_placement_id());
+        self.placements.push(Placement {
+            id,
+            pattern_id: 0,
+            track_id: track as u32,
+            start_beat: beat,
+            sample_path: payload.path.clone(),
+            length_beats,
+        });
+        self.commit_live(cx);
+        self.channel_rack.update(cx, |rack, _| rack.persist());
     }
 
     /// Playlist ruler click-to-seek — meaningless in pattern mode (per
@@ -265,14 +330,9 @@ impl Render for Playlist {
         let patterns: Vec<(u32, String, f64)> =
             rack.patterns().iter().map(|p| (p.id, p.name.clone(), p.length_beats)).collect();
 
-        let blocks: Vec<(Placement, String)> = self
-            .placements
-            .iter()
-            .map(|p| {
-                let name = patterns.iter().find(|(id, ..)| *id == p.pattern_id).map(|(_, n, _)| n.clone());
-                (p.clone(), name.unwrap_or_else(|| "?".to_string()))
-            })
-            .collect();
+        let pattern_list = rack.patterns();
+        let blocks: Vec<(Placement, String)> =
+            self.placements.iter().map(|p| (p.clone(), block_label(p, pattern_list))).collect();
         let dying: Vec<(Placement, String, f32)> = self
             .dying
             .iter()
@@ -303,10 +363,38 @@ impl Render for Playlist {
 
         let mut block_layer = div().absolute().left_0().top_0().size_full();
         for (placement, name) in &blocks {
-            let length = patterns.iter().find(|(id, ..)| *id == placement.pattern_id).map(|(_, _, l)| *l).unwrap_or(4.0);
+            let is_clip = !placement.sample_path.is_empty();
+            let length = if is_clip {
+                placement.length_beats.max(0.0)
+            } else {
+                patterns.iter().find(|(id, ..)| *id == placement.pattern_id).map(|(_, _, l)| *l).unwrap_or(4.0)
+            };
             let left = placement.start_beat as f32 * BEAT_W - scroll_x;
             let top = placement.track_id as f32 * ROW_H - scroll_y;
             let width = (length as f32 * BEAT_W - 2.0).max(1.0);
+
+            // What's actually inside this block: a clip shows its own
+            // waveform; a pattern shows its aggregated note content as a
+            // simplified, non-interactive mini-MIDI preview; an empty
+            // pattern shows just the bare content background.
+            let content: gpui::AnyElement = if is_clip {
+                match rack.sample_for(&placement.sample_path) {
+                    Some(sample) => canvas(move |_, _, _| {}, move |bounds, _, window, _| paint_waveform(window, bounds, &sample))
+                        .size_full()
+                        .into_any_element(),
+                    None => div().size_full().into_any_element(),
+                }
+            } else {
+                let notes = rack.pattern_notes(placement.pattern_id);
+                if notes.is_empty() {
+                    div().size_full().into_any_element()
+                } else {
+                    canvas(move |_, _, _| {}, move |bounds, _, window, _| paint_mini_notes(window, bounds, &notes, length))
+                        .size_full()
+                        .into_any_element()
+                }
+            };
+
             block_layer = block_layer.child(
                 div()
                     .absolute()
@@ -315,18 +403,32 @@ impl Render for Playlist {
                     .w(px(width))
                     .h(px(ROW_H - 2.0))
                     .rounded(theme::RADIUS_SM)
-                    .bg(theme::pattern_color(placement.pattern_id))
-                    .flex()
-                    .items_center()
-                    .px_1()
                     .overflow_hidden()
-                    .text_size(px(10.0))
-                    .text_color(theme::accent_text())
-                    .child(name.clone()),
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(TITLE_H))
+                            .w_full()
+                            .flex_shrink_0()
+                            .bg(theme::pattern_color(placement.pattern_id))
+                            .flex()
+                            .items_center()
+                            .px_1()
+                            .overflow_hidden()
+                            .text_size(px(9.0))
+                            .text_color(theme::accent_text())
+                            .child(name.clone()),
+                    )
+                    .child(div().flex_1().w_full().bg(CONTENT_BG).child(content)),
             );
         }
         for (placement, name, progress) in &dying {
-            let length = patterns.iter().find(|(id, ..)| *id == placement.pattern_id).map(|(_, _, l)| *l).unwrap_or(4.0);
+            let length = if !placement.sample_path.is_empty() {
+                placement.length_beats.max(0.0)
+            } else {
+                patterns.iter().find(|(id, ..)| *id == placement.pattern_id).map(|(_, _, l)| *l).unwrap_or(4.0)
+            };
             let left = placement.start_beat as f32 * BEAT_W - scroll_x;
             let top = placement.track_id as f32 * ROW_H - scroll_y;
             let width = (length as f32 * BEAT_W - 2.0).max(1.0);
@@ -496,6 +598,18 @@ impl Render for Playlist {
                                 .size_full(),
                             )
                             .child(block_layer)
+                            // Drag a sample straight from the File Browser
+                            // onto the timeline — reuses the same payload
+                            // type Channel Rack rows/footer already drop
+                            // targets for (`SampleDragPayload`), the other
+                            // way a sample reaches this app.
+                            .drag_over::<SampleDragPayload>(|style, _, _, _| {
+                                style.border_1().border_color(theme::accent()).bg(theme::accent().alpha(0.1))
+                            })
+                            .on_drop(cx.listener(|this, payload: &SampleDragPayload, window, cx| {
+                                let position = window.mouse_position();
+                                this.handle_sample_drop(payload, position, cx);
+                            }))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, ev: &MouseDownEvent, _, cx| this.handle_mouse_down(ev, cx)),
@@ -639,5 +753,83 @@ fn paint_lanes(
                 Default::default(),
             ));
         }
+    }
+}
+
+/// A clip block's "what's inside it" content: a min/max-per-pixel-column
+/// waveform, read straight off the cached decoded sample — no separate
+/// downsampled copy kept around, since this is only ever painted at a
+/// handful of pixels wide and recomputing per frame is cheap at that
+/// scale. Only the first channel is sampled per bucket (a mono-looking
+/// preview is plenty at this size; this isn't the Mixer's own scope).
+fn paint_waveform(window: &mut Window, bounds: gpui::Bounds<gpui::Pixels>, sample: &SampleBuffer) {
+    let width_px = f32::from(bounds.size.width).max(1.0) as usize;
+    let height = f32::from(bounds.size.height);
+    let origin = bounds.origin;
+    let channels = sample.channels.max(1) as usize;
+    let frame_count = sample.frame_count() as usize;
+    if frame_count == 0 || width_px == 0 {
+        return;
+    }
+    let frames_per_col = (frame_count / width_px).max(1);
+    let mid = height / 2.0;
+    let color = theme::accent_dim();
+    for col in 0..width_px {
+        let start = col * frames_per_col;
+        let end = ((col + 1) * frames_per_col).min(frame_count);
+        if start >= end {
+            continue;
+        }
+        let mut lo = 0.0f32;
+        let mut hi = 0.0f32;
+        for frame in start..end {
+            let s = sample.data[frame * channels];
+            lo = lo.min(s);
+            hi = hi.max(s);
+        }
+        let y0 = mid - hi * mid;
+        let y1 = mid - lo * mid;
+        let h = (y1 - y0).max(1.0);
+        window.paint_quad(quad(
+            gpui::Bounds { origin: point(origin.x + px(col as f32), origin.y + px(y0)), size: size(px(1.0), px(h)) },
+            px(0.0),
+            color,
+            px(0.0),
+            gpui::transparent_black(),
+            Default::default(),
+        ));
+    }
+}
+
+/// A pattern block's "what's inside it" content: every channel's notes
+/// for that pattern (`ChannelRack::pattern_notes`, already including any
+/// step-sequencer content now that steps are just notes), flattened and
+/// scaled into the content area — a simplified, non-interactive cousin of
+/// the Piano Roll's own note painting, over a fixed assumed pitch range
+/// rather than one computed per block (consistent and cheap, and this
+/// preview is far too small for a tight per-block range to matter).
+fn paint_mini_notes(window: &mut Window, bounds: gpui::Bounds<gpui::Pixels>, notes: &[Note], length_beats: f64) {
+    const PITCH_LO: i32 = 24;
+    const PITCH_HI: i32 = 108;
+    let length_steps = (length_beats * 4.0).max(1.0);
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    let origin = bounds.origin;
+    let pitch_span = (PITCH_HI - PITCH_LO).max(1) as f32;
+    let color = theme::accent();
+    for note in notes {
+        let x0 = (note.start / length_steps).clamp(0.0, 1.0) as f32 * width;
+        let x1 = ((note.start + note.length) / length_steps).clamp(0.0, 1.0) as f32 * width;
+        let w = (x1 - x0).max(1.0);
+        let t = 1.0 - (note.pitch.clamp(PITCH_LO, PITCH_HI) - PITCH_LO) as f32 / pitch_span;
+        let y = (t * (height - 2.0).max(0.0)).clamp(0.0, (height - 2.0).max(0.0));
+        window.paint_quad(quad(
+            gpui::Bounds { origin: point(origin.x + px(x0), origin.y + px(y)), size: size(px(w), px(2.0)) },
+            px(0.0),
+            color,
+            px(0.0),
+            gpui::transparent_black(),
+            Default::default(),
+        ));
     }
 }

@@ -38,24 +38,48 @@ pub struct SongPlacementVoiceData {
     pub channels: Vec<ChannelVoiceData>,
 }
 
+/// A dragged-straight-into-the-Playlist sample clip's audio-thread-ready
+/// data — just where it fires and what it plays. Unlike a pattern
+/// placement it has no channel/mixer-track identity of its own: it always
+/// plays as a one-shot straight to Master, same as the original's
+/// documented `kind: 'clip'` behavior.
+pub struct ClipVoiceData {
+    pub start_step: u32,
+    pub sample: Arc<SampleBuffer>,
+}
+
 pub struct SongSnapshot {
     pub placements: Vec<SongPlacementVoiceData>,
+    pub clips: Vec<ClipVoiceData>,
     pub song_length_steps: u32,
 }
 
 /// Builds the song-mode schedule from every Playlist placement, simplified
-/// per `stages/06-playlist.md`: each placement's length is its pattern's
-/// *nominal* `length_beats`, not the original's content-driven "longest
-/// channel's reach" computation. Noted as a deliberate simplification in
-/// `PROGRESS.md`, not a forgotten feature.
+/// per `stages/06-playlist.md`: each pattern placement's length is its
+/// pattern's *nominal* `length_beats`, not the original's content-driven
+/// "longest channel's reach" computation. Noted as a deliberate
+/// simplification in `PROGRESS.md`, not a forgotten feature. A `Placement`
+/// with a non-empty `sample_path` is a clip, not a pattern block — it's
+/// collected into `clips` instead, using its own stored `length_beats`
+/// rather than looking one up from a pattern.
 pub fn build_song_snapshot(project: &ProjectFile, samples: &HashMap<String, Arc<SampleBuffer>>) -> SongSnapshot {
     let any_soloed = project.channels.items.iter().any(|c| c.soloed);
     let steps_per_bar = project.beats_per_bar.max(1) * 4;
 
     let mut placements = Vec::new();
+    let mut clips = Vec::new();
     let mut song_length_steps: u32 = 0;
 
     for placement in &project.placements.items {
+        if !placement.sample_path.is_empty() {
+            let Some(sample) = samples.get(&placement.sample_path) else { continue };
+            let start_step = (placement.start_beat * 4.0).round().max(0.0) as u32;
+            let length_steps = (placement.length_beats * 4.0).round().max(1.0) as u32;
+            song_length_steps = song_length_steps.max(start_step + length_steps);
+            clips.push(ClipVoiceData { start_step, sample: sample.clone() });
+            continue;
+        }
+
         let Some(pattern) = project.patterns.items.iter().find(|p| p.id == placement.pattern_id) else { continue };
         let length_steps = (pattern.length_beats * 4.0).round().max(1.0) as u32;
         let start_step = (placement.start_beat * 4.0).round().max(0.0) as u32;
@@ -73,7 +97,6 @@ pub fn build_song_snapshot(project: &ProjectFile, samples: &HashMap<String, Arc<
                     .find(|e| e.pattern_id == pattern.id && e.channel_id == ch.id);
                 Some(ChannelVoiceData {
                     sample,
-                    steps: content.map(|c| c.steps.clone()).unwrap_or_default(),
                     notes: content.map(|c| c.notes.clone()).unwrap_or_default(),
                     volume: ch.volume as f32,
                     pan: ch.pan as f32,
@@ -91,7 +114,7 @@ pub fn build_song_snapshot(project: &ProjectFile, samples: &HashMap<String, Arc<
     // arrangement still reports one bar rather than zero.
     song_length_steps = ((song_length_steps.max(1) + steps_per_bar - 1) / steps_per_bar) * steps_per_bar;
 
-    SongSnapshot { placements, song_length_steps }
+    SongSnapshot { placements, clips, song_length_steps }
 }
 
 /// One channel's audio-thread-ready playback data for a single pattern,
@@ -99,7 +122,6 @@ pub fn build_song_snapshot(project: &ProjectFile, samples: &HashMap<String, Arc<
 /// callback never has to walk the project model's structure itself.
 pub struct ChannelVoiceData {
     pub sample: Arc<SampleBuffer>,
-    pub steps: Vec<bool>,
     pub notes: Vec<Note>,
     pub volume: f32,
     pub pan: f32,
@@ -191,7 +213,6 @@ pub fn build_snapshot(
                 .find(|e| e.pattern_id == pattern.id && e.channel_id == ch.id);
             Some(ChannelVoiceData {
                 sample,
-                steps: content.map(|c| c.steps.clone()).unwrap_or_default(),
                 notes: content.map(|c| c.notes.clone()).unwrap_or_default(),
                 volume: ch.volume as f32,
                 pan: ch.pan as f32,
@@ -274,47 +295,35 @@ impl Voice {
     }
 }
 
-/// Shared by pattern mode and song mode: checks one channel's step/note
-/// content against a single step index and schedules any voice it
-/// triggers. `step` is pattern-relative in pattern mode, placement-local
-/// in song mode — the caller picks which. No per-channel step-tiling here
-/// (a channel's `steps` is a fixed 16-length pattern-mode row; stepping
-/// past it in song mode for a longer placement just plays silence) —
-/// that's the original's "per-channel independent looping", still
-/// deferred per `02-feature-scope.md` in both modes, not a new gap this
-/// stage introduces.
+/// Shared by pattern mode and song mode: checks one channel's note content
+/// against a single step index and schedules any voice it triggers. `step`
+/// is pattern-relative in pattern mode, placement-local in song mode — the
+/// caller picks which. The step sequencer and the Piano Roll are the same
+/// backend (a step is a `Note { pitch: project::STEP_PITCH, length: 1.0,
+/// .. }`), so there's only this one scheduling path now — no separate
+/// boolean-step branch. No per-channel step-tiling here (stepping past a
+/// channel's own note content in song mode for a longer placement just
+/// plays silence) — that's the original's "per-channel independent
+/// looping", still deferred per `02-feature-scope.md` in both modes, not a
+/// new gap this stage introduces.
 fn trigger_channel_step(ch: &ChannelVoiceData, step: i64, bpm: f64, out_sample_rate: u32, voices: &mut Vec<Voice>) {
     if ch.muted || step < 0 {
         return;
     }
-    if ch.notes.is_empty() {
-        if ch.steps.get(step as usize).copied().unwrap_or(false) {
+    for note in &ch.notes {
+        if note.start.round() as i64 == step {
+            let rate = pitch_to_playback_rate(note.pitch);
+            let duration_secs = note.length * step_duration_secs(bpm);
+            let duration_frames = (duration_secs * out_sample_rate as f64).max(1.0) as u64;
             voices.push(Voice::new(
                 ch.sample.clone(),
-                1.0,
-                ch.volume,
+                rate,
+                ch.volume * note.velocity as f32,
                 ch.pan,
-                Envelope::ring(out_sample_rate),
+                Envelope::shaped(duration_frames, out_sample_rate),
                 out_sample_rate,
                 ch.bus,
             ));
-        }
-    } else {
-        for note in &ch.notes {
-            if note.start.round() as i64 == step {
-                let rate = pitch_to_playback_rate(note.pitch);
-                let duration_secs = note.length * step_duration_secs(bpm);
-                let duration_frames = (duration_secs * out_sample_rate as f64).max(1.0) as u64;
-                voices.push(Voice::new(
-                    ch.sample.clone(),
-                    rate,
-                    ch.volume * note.velocity as f32,
-                    ch.pan,
-                    Envelope::shaped(duration_frames, out_sample_rate),
-                    out_sample_rate,
-                    ch.bus,
-                ));
-            }
         }
     }
 }
@@ -605,7 +614,7 @@ enum EngineMessage {
     /// Replaces the Playlist's song-mode schedule. Pushed on every project
     /// edit alongside `UpdateContent` (patterns, placements, channel
     /// content can all affect it), same reasoning as that variant.
-    UpdateSongContent { placements: Vec<SongPlacementVoiceData>, song_length_steps: u32 },
+    UpdateSongContent { placements: Vec<SongPlacementVoiceData>, clips: Vec<ClipVoiceData>, song_length_steps: u32 },
     /// Replaces the mixer-bus list + Master volume. Applies to both
     /// pattern and song mode identically, so it's pushed independently of
     /// either rather than duplicated into both snapshot kinds.
@@ -669,6 +678,7 @@ impl AudioEngine {
         let mut pattern_length_steps: i64 = 16;
         let mut steps_per_bar: i64 = 16;
         let mut song_placements: Vec<SongPlacementVoiceData> = Vec::new();
+        let mut song_clips: Vec<ClipVoiceData> = Vec::new();
         let mut song_length_steps: i64 = 16;
         let mut voices: Vec<Voice> = Vec::new();
         let mut last_triggered_step: i64 = -1;
@@ -699,8 +709,9 @@ impl AudioEngine {
                             EngineMessage::Preview { sample, volume, pan } => {
                                 voices.push(Voice::new(sample, 1.0, volume, pan, Envelope::ring(out_sample_rate), out_sample_rate, 0));
                             }
-                            EngineMessage::UpdateSongContent { placements, song_length_steps: new_len } => {
+                            EngineMessage::UpdateSongContent { placements, clips, song_length_steps: new_len } => {
                                 song_placements = placements;
+                                song_clips = clips;
                                 song_length_steps = new_len.max(1) as i64;
                             }
                             EngineMessage::UpdateMixer { buses: new_buses, master_volume: new_master } => {
@@ -773,6 +784,29 @@ impl AudioEngine {
                                         let local_step = whole_step - start;
                                         for ch in &placement.channels {
                                             trigger_channel_step(ch, local_step, bpm, out_sample_rate, &mut voices);
+                                        }
+                                    }
+                                    // Dragged-into-the-Playlist clips: a
+                                    // plain one-shot the instant their
+                                    // start step arrives, center-panned
+                                    // straight to Master (no channel/
+                                    // mixer-track identity of their own),
+                                    // ringing out to its own natural
+                                    // length rather than being cut at
+                                    // `length_beats` — that field only
+                                    // controls how much timeline space the
+                                    // Playlist block reserves.
+                                    for clip in &song_clips {
+                                        if clip.start_step as i64 == whole_step {
+                                            voices.push(Voice::new(
+                                                clip.sample.clone(),
+                                                1.0,
+                                                1.0,
+                                                0.5,
+                                                Envelope::ring(out_sample_rate),
+                                                out_sample_rate,
+                                                0,
+                                            ));
                                         }
                                     }
                                 }
@@ -1006,6 +1040,7 @@ impl AudioEngine {
         self.state.song_length_steps.store(snapshot.song_length_steps.max(1), Ordering::Relaxed);
         let _ = self.sender.send(EngineMessage::UpdateSongContent {
             placements: snapshot.placements,
+            clips: snapshot.clips,
             song_length_steps: snapshot.song_length_steps,
         });
     }
@@ -1073,7 +1108,7 @@ mod song_snapshot_tests {
     fn placement_steps_come_from_the_pattern_not_a_manual_length() {
         let mut project = ProjectFile::default();
         project.patterns.items.push(Pattern { id: 2, name: "B".to_string(), length_beats: 4.0 });
-        project.placements.items.push(Placement { id: 1, pattern_id: 2, track_id: 0, start_beat: 4.0 });
+        project.placements.items.push(Placement { id: 1, pattern_id: 2, track_id: 0, start_beat: 4.0, sample_path: String::new(), length_beats: 0.0 });
 
         let snapshot = build_song_snapshot(&project, &HashMap::new());
         assert_eq!(snapshot.placements.len(), 1);
@@ -1089,7 +1124,7 @@ mod song_snapshot_tests {
         // Default pattern 1 is 4 beats (16 steps); starting at beat 1
         // makes the arrangement end mid-bar (step 20), which must round
         // up to the next whole bar (32), not truncate to 16.
-        project.placements.items.push(Placement { id: 1, pattern_id: 1, track_id: 0, start_beat: 1.0 });
+        project.placements.items.push(Placement { id: 1, pattern_id: 1, track_id: 0, start_beat: 1.0, sample_path: String::new(), length_beats: 0.0 });
 
         let snapshot = build_song_snapshot(&project, &HashMap::new());
         assert_eq!(snapshot.song_length_steps, 32);

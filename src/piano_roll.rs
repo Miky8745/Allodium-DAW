@@ -46,6 +46,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
+use gpui::component::button::{Button, ButtonVariants};
+use gpui::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui::{
     Context, Entity, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement, Pixels, Point, Render, ScrollEvent, Styled, Window, canvas, div, linear_color_stop,
@@ -364,6 +366,49 @@ impl PianoRoll {
         let notes = self.notes.clone();
         self.channel_rack.update(cx, |rack, cx| rack.update_notes(channel_id, notes, cx));
     }
+
+    /// A channel-picker dropdown — an easier way to switch which channel
+    /// the Piano Roll shows than hunting down its row in the Channel Rack
+    /// and double-clicking it. It's not a second notion of "which channel
+    /// is open": picking an item here just calls the same
+    /// `ChannelRack::select_channel` that double-click already does, so
+    /// `sync_selection`'s existing live-follow keeps working unchanged —
+    /// there is still only one "selected channel" in the whole app.
+    fn render_channel_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rack = self.channel_rack.clone();
+        let current = self.loaded_channel_id;
+        let channels: Vec<(u32, String)> = self
+            .channel_rack
+            .read(cx)
+            .channels()
+            .iter()
+            .map(|c| (c.id, if c.name.is_empty() { "Drop sample".to_string() } else { c.name.clone() }))
+            .collect();
+        let current_label =
+            channels.iter().find(|(id, _)| Some(*id) == current).map(|(_, l)| l.clone()).unwrap_or_else(|| "No channel".to_string());
+
+        div()
+            .h(px(28.0))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .bg(theme::HEADER_BG)
+            .border_b_1()
+            .border_color(theme::BORDER)
+            .child(div().text_size(px(10.0)).text_color(theme::accent_dim()).child("Channel"))
+            .child(
+                Button::new("piano-roll-channel").ghost().compact().label(current_label).dropdown_menu(move |menu, _, _| {
+                    channels.iter().cloned().fold(menu, |menu, (id, label)| {
+                        let rack = rack.clone();
+                        menu.item(PopupMenuItem::new(label).checked(Some(id) == current).on_click(move |_, _, cx| {
+                            rack.update(cx, |r, cx| r.select_channel(id, cx));
+                        }))
+                    })
+                }),
+            )
+    }
 }
 
 impl Render for PianoRoll {
@@ -376,6 +421,19 @@ impl Render for PianoRoll {
         let rack = self.channel_rack.read(cx);
         let playing = rack.is_playing();
         let current_step = if playing { rack.current_step() } else { -1.0 };
+
+        // Every other channel's notes, shown dimmed and read-only behind
+        // the focused channel's own — "if there is something in a channel
+        // you are not focusing, display this channel's contents as light
+        // gray unmovable notes." Never pushed into `self.notes`, so
+        // `hit_test`/`note_at` (which only ever scan that field) can't
+        // select or drag them.
+        let background_notes: Vec<Note> = rack
+            .channels()
+            .iter()
+            .filter(|c| Some(c.id) != self.loaded_channel_id)
+            .flat_map(|c| rack.notes_for(c.id))
+            .collect();
 
         let notes = self.notes.clone();
         let dying: Vec<(Note, f32)> = self
@@ -401,7 +459,7 @@ impl Render for PianoRoll {
                     move |bounds, _, window, _| {
                         grid_origin.set(bounds.origin);
                         grid_size.set(bounds.size);
-                        paint_grid(window, bounds, scroll_x, scroll_y, &notes, &dying, current_step);
+                        paint_grid(window, bounds, scroll_x, scroll_y, &notes, &background_notes, &dying, current_step);
                     },
                 )
                 .size_full(),
@@ -465,6 +523,7 @@ impl Render for PianoRoll {
             .flex()
             .flex_col()
             .bg(theme::BG_APP)
+            .child(self.render_channel_picker(cx))
             .child(
                 div()
                     .relative()
@@ -576,6 +635,7 @@ fn paint_grid(
     scroll_x: f32,
     scroll_y: f32,
     notes: &[Note],
+    background_notes: &[Note],
     dying: &[(Note, f32)],
     current_step: f64,
 ) {
@@ -633,6 +693,19 @@ fn paint_grid(
     let visible_end = last_step.max(0) as f64;
     let first_visible_pitch = 127 - last_row.min(127).max(0);
     let last_visible_pitch = 127 - first_row.min(127).max(0);
+
+    // Other channels' notes, dimmed and drawn first so the focused
+    // channel's own (real, draggable) notes always land on top of them.
+    let ghost_color = Hsla { h: 0.0, s: 0.0, l: 0.75, a: 0.35 };
+    for note in background_notes {
+        if note.start + note.length <= visible_start || note.start > visible_end {
+            continue;
+        }
+        if note.pitch < first_visible_pitch - 1 || note.pitch > last_visible_pitch + 1 {
+            continue;
+        }
+        paint_note(window, origin, scroll_x, scroll_y, note, ghost_color, 1.0);
+    }
 
     let note_color = theme::accent();
     for note in notes {

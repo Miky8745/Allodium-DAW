@@ -47,6 +47,21 @@ impl ChannelRack {
             .unwrap_or_default()
     }
 
+    /// Every note across every channel for a given pattern, flattened —
+    /// unlike `notes_for` (one channel, the *selected* pattern only), this
+    /// takes an explicit `pattern_id` so a caller like the Playlist can
+    /// preview any placed pattern's content, not just whichever one is
+    /// currently open for editing.
+    pub fn pattern_notes(&self, pattern_id: u32) -> Vec<project::Note> {
+        self.project
+            .content
+            .items
+            .iter()
+            .filter(|e| e.pattern_id == pattern_id)
+            .flat_map(|e| e.notes.iter().cloned())
+            .collect()
+    }
+
     /// Replaces a channel's notes and immediately feeds the engine a fresh
     /// snapshot so an edit is audible mid-playback, but does *not* write to
     /// disk — call `persist` for that, same split as a slider/dial drag

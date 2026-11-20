@@ -182,7 +182,7 @@ impl ChannelRack {
             self.project.content.items.push(PatternContentEntry {
                 pattern_id,
                 channel_id,
-                steps: vec![false; STEP_COUNT],
+                steps: Vec::new(),
                 notes: vec![],
             });
         }
@@ -222,7 +222,7 @@ impl ChannelRack {
         self.project.content.items.push(PatternContentEntry {
             pattern_id,
             channel_id: id,
-            steps: vec![false; STEP_COUNT],
+            steps: Vec::new(),
             notes: vec![],
         });
 
@@ -267,7 +267,7 @@ impl ChannelRack {
         self.project.content.items.push(PatternContentEntry {
             pattern_id,
             channel_id: id,
-            steps: vec![false; STEP_COUNT],
+            steps: Vec::new(),
             notes: vec![],
         });
 
@@ -304,6 +304,27 @@ impl ChannelRack {
         self.push_snapshot();
         self.save();
         cx.notify();
+    }
+
+    /// Decodes and caches a sample by path if it isn't already cached —
+    /// shared infrastructure for the Playlist's drag-a-sample-straight-
+    /// onto-the-timeline drop, which (unlike `assign_sample`/
+    /// `add_channel_from_path`) has no channel to assign the result to.
+    pub fn cache_sample(&mut self, path: &std::path::Path) -> Result<Arc<SampleBuffer>, String> {
+        let path_str = path.to_string_lossy().to_string();
+        if let Some(sample) = self.samples.get(&path_str) {
+            return Ok(sample.clone());
+        }
+        let sample = audio::decode_sample(path)?;
+        self.samples.insert(path_str, sample.clone());
+        Ok(sample)
+    }
+
+    /// A cached sample's decoded data, if it's been loaded — the
+    /// Playlist's clip-block waveform reads through this rather than
+    /// holding its own copy of `samples`.
+    pub fn sample_for(&self, path: &str) -> Option<Arc<SampleBuffer>> {
+        self.samples.get(path).cloned()
     }
 
     pub fn toggle_play(&mut self, cx: &mut Context<Self>) {
