@@ -93,6 +93,12 @@ impl ChannelRack {
         self.engine.song_step()
     }
 
+    /// The Playlist ruler's click-to-seek — moves the playhead without
+    /// otherwise touching transport state.
+    pub fn seek_song_to_step(&self, step: f64) {
+        self.engine.seek_to_step(step);
+    }
+
     /// Toggling Pattern/Song restarts playback in the new mode immediately
     /// if the transport is already running — mirrors the original's
     /// documented behavior rather than waiting for the next manual Play.

@@ -10,8 +10,8 @@ use std::sync::Arc;
 use gpui::component::input::{InputEvent, InputState};
 use gpui::component::{Icon, Sizable};
 use gpui::{
-    AppContext, ClickEvent, Context, DragMoveEvent, Entity, Focusable, IntoElement, ModifiersChangedEvent,
-    MouseDownEvent, ParentElement, Pixels, Point, Render, Styled, Window, div,
+    AppContext, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement,
+    ModifiersChangedEvent, MouseDownEvent, ParentElement, Pixels, Point, Render, Styled, Window, div,
     linear_color_stop, linear_gradient, point, prelude::*, px, size,
 };
 
@@ -114,6 +114,11 @@ pub struct AppShell {
     /// here (not inside `render_toolbar`, which reruns every frame) so its
     /// text and focus survive across renders while editing is open.
     pub(crate) tempo_input: Entity<InputState>,
+    /// Tracked on the root div so the Space-to-play/stop keybinding
+    /// (`toolbar::TogglePlayback`) has somewhere to dispatch to by default
+    /// — nothing else claims focus until a user action does (e.g. editing
+    /// the BPM field), so this is where key dispatch starts at launch.
+    focus_handle: FocusHandle,
 }
 
 /// Dragging the BPM pill vertically nudges tempo by whole BPM per pixel of
@@ -140,6 +145,8 @@ impl AppShell {
             _ => {}
         })
         .detach();
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window, cx);
         Self {
             frame_stats: FrameStats::new(),
             channel_rack,
@@ -156,6 +163,7 @@ impl AppShell {
             toolbar: crate::toolbar::ToolbarState::default(),
             preferences,
             tempo_input,
+            focus_handle,
         }
     }
 
@@ -478,6 +486,8 @@ impl Render for AppShell {
             .flex_col()
             .bg(theme::BG_APP)
             .font_family(theme::FONT_UI)
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::on_toggle_playback))
             .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, _, cx| {
                 this.toolbar.modifiers = ev.modifiers;
                 cx.notify();

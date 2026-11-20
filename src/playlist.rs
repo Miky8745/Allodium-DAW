@@ -27,8 +27,10 @@ const BAR_COUNT: u32 = 64;
 const BEAT_W: f32 = 40.0;
 const ROW_H: f32 = 40.0;
 const TRACK_PANEL_W: f32 = 76.0;
-/// The timebar above the grid, numbering each beat gridline.
+/// The timebar above the grid, numbering each bar.
 const RULER_H: f32 = 20.0;
+/// How many bars share one alternating background color.
+const BARS_PER_GROUP: u32 = 4;
 const DEATH_FADE_SECS: f32 = 0.3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -224,6 +226,21 @@ impl Playlist {
         }
     }
 
+    /// Playlist ruler click-to-seek — meaningless in pattern mode (per
+    /// `docs/audio-playback.md`'s "Song start marker": "the timeline
+    /// position has no relationship to what's playing" outside Song
+    /// mode), so it's a no-op there rather than silently seeking a
+    /// transport the ruler doesn't represent.
+    fn handle_ruler_click(&mut self, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        if !self.channel_rack.read(cx).is_song_mode() {
+            return;
+        }
+        let x = f32::from(position.x - self.grid_origin.get().x) + self.scroll_x;
+        let beat = (x / BEAT_W).max(0.0) as f64;
+        self.channel_rack.update(cx, |rack, _| rack.seek_song_to_step(beat * 4.0));
+        cx.notify();
+    }
+
     fn prune_dying(&mut self) {
         self.dying.retain(|d| d.died_at.elapsed().as_secs_f32() < DEATH_FADE_SECS);
     }
@@ -377,16 +394,17 @@ impl Render for Playlist {
                 })),
         );
 
-        // Numbers the grid's darker beat gridlines (every fourth sixteenth-
-        // note "chunk" — see `paint_lanes`) — only the beats actually in
-        // view, mirroring how `paint_lanes` itself only paints the visible
-        // bar/chunk/beat range rather than the whole 64-bar timeline.
+        // Numbers the grid's bold bar gridlines (see `paint_lanes`) — only
+        // the bars actually in view, mirroring how `paint_lanes` itself
+        // only paints the visible bar/beat range rather than the whole
+        // 64-bar timeline.
+        let bar_w = beats_per_bar as f32 * BEAT_W;
         let viewport_w = f32::from(self.grid_size.get().width).max(0.0);
-        let first_beat_label = (scroll_x / BEAT_W).floor().max(0.0) as i32;
-        let last_beat_label = ((scroll_x + viewport_w) / BEAT_W).ceil() as i32;
+        let first_bar_label = (scroll_x / bar_w).floor().max(0.0) as i32;
+        let last_bar_label = ((scroll_x + viewport_w) / bar_w).ceil() as i32;
         let mut ruler_labels = div().absolute().left_0().top_0().size_full();
-        for beat in first_beat_label..=last_beat_label {
-            let x = beat as f32 * BEAT_W - scroll_x;
+        for bar in first_bar_label..=last_bar_label {
+            let x = bar as f32 * bar_w - scroll_x;
             ruler_labels = ruler_labels.child(
                 div()
                     .absolute()
@@ -397,7 +415,7 @@ impl Render for Playlist {
                     .items_center()
                     .text_size(px(9.0))
                     .text_color(theme::accent_dim())
-                    .child(format!("{}", beat + 1)),
+                    .child(format!("{}", bar + 1)),
             );
         }
 
@@ -429,7 +447,21 @@ impl Render for Playlist {
                     .border_b_1()
                     .border_color(theme::BORDER)
                     .child(div().w(px(TRACK_PANEL_W)).h_full())
-                    .child(div().flex_1().h_full().relative().overflow_hidden().child(ruler_labels)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .relative()
+                            .overflow_hidden()
+                            .cursor_pointer()
+                            .child(ruler_labels)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                                    this.handle_ruler_click(ev.position, cx)
+                                }),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -503,13 +535,13 @@ impl Render for Playlist {
     }
 }
 
-/// Vertical bar striping + sixteenth-note ("chunk")/beat gridlines + thin
-/// row separators + the Song-mode playhead. Placement blocks themselves are
-/// plain `div()`s layered on top (see `render`) rather than hand-painted,
-/// unlike the Piano Roll — there are only ever a handful of them, so GPUI's
-/// own text layout for pattern-name labels is simpler than hand-shaping
-/// text into a `canvas`. The ruler above the grid (also built in `render`)
-/// numbers the same beat lines this paints.
+/// Vertical bar-group striping + beat/bar gridlines + thin row separators +
+/// the Song-mode playhead. Placement blocks themselves are plain `div()`s
+/// layered on top (see `render`) rather than hand-painted, unlike the
+/// Piano Roll — there are only ever a handful of them, so GPUI's own text
+/// layout for pattern-name labels is simpler than hand-shaping text into a
+/// `canvas`. The ruler above the grid (also built in `render`) numbers the
+/// same bold bar lines this paints.
 fn paint_lanes(
     window: &mut Window,
     bounds: gpui::Bounds<gpui::Pixels>,
@@ -522,18 +554,19 @@ fn paint_lanes(
     let height = f32::from(bounds.size.height);
     let origin = bounds.origin;
 
-    // The grid's alternating color is per *bar*, not per row — each bar
-    // spans the grid's full height rather than a single track's row.
+    // The grid's alternating color is per *group of bars*, not per row or
+    // single bar — each group spans the grid's full height.
     let bar_w = beats_per_bar as f32 * BEAT_W;
-    let first_bar = (scroll_x / bar_w).floor().max(0.0) as i32;
-    let last_bar = ((scroll_x + width) / bar_w).ceil() as i32;
-    for bar in first_bar..=last_bar {
-        if bar % 2 != 0 {
+    let group_w = BARS_PER_GROUP as f32 * bar_w;
+    let first_group = (scroll_x / group_w).floor().max(0.0) as i32;
+    let last_group = ((scroll_x + width) / group_w).ceil() as i32;
+    for group in first_group..=last_group {
+        if group % 2 != 0 {
             continue;
         }
-        let x = origin.x + px(bar as f32 * bar_w - scroll_x);
+        let x = origin.x + px(group as f32 * group_w - scroll_x);
         window.paint_quad(quad(
-            gpui::Bounds { origin: point(x, origin.y), size: size(px(bar_w), px(height)) },
+            gpui::Bounds { origin: point(x, origin.y), size: size(px(group_w), px(height)) },
             px(0.0),
             Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.03 },
             px(0.0),
@@ -556,39 +589,35 @@ fn paint_lanes(
         ));
     }
 
-    // Each bar cell divided into 16 sixteenth-note "chunks" (generalized to
-    // `beats_per_bar * 4`, matching the step convention used everywhere
-    // else in this app) — faint lines at every chunk boundary.
-    let chunk_w = BEAT_W / 4.0;
-    let first_chunk = (scroll_x / chunk_w).floor().max(0.0) as i64;
-    let last_chunk = ((scroll_x + width) / chunk_w).ceil() as i64;
-    for chunk in first_chunk..=last_chunk {
-        if chunk % 4 == 0 {
-            continue; // a beat boundary — drawn darker below instead.
+    // Beat lines inside each bar — plain, lighter lines. Skips multiples of
+    // `beats_per_bar` (the bar's own start), which get the bold bar line
+    // below instead.
+    let first_beat = (scroll_x / BEAT_W).floor().max(0.0) as i64;
+    let last_beat = ((scroll_x + width) / BEAT_W).ceil() as i64;
+    for beat in first_beat..=last_beat {
+        if beat.rem_euclid(beats_per_bar as i64) == 0 {
+            continue; // a bar boundary — drawn bold below instead.
         }
-        let x = origin.x + px(chunk as f32 * chunk_w - scroll_x);
+        let x = origin.x + px(beat as f32 * BEAT_W - scroll_x);
         window.paint_quad(quad(
             gpui::Bounds { origin: point(x, origin.y), size: size(px(1.0), px(height)) },
             px(0.0),
-            Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.04 },
+            Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.06 },
             px(0.0),
             gpui::transparent_black(),
             Default::default(),
         ));
     }
 
-    // Beat lines — every fourth chunk, one quarter of a bar cell — drawn
-    // darker than the plain chunk lines above; this also covers every bar
-    // boundary (chunk 0 of each bar is always a beat line too), so there's
-    // no separate bar-boundary line to draw. Numbered by the ruler.
-    let first_beat = (scroll_x / BEAT_W).floor().max(0.0) as i64;
-    let last_beat = ((scroll_x + width) / BEAT_W).ceil() as i64;
-    for beat in first_beat..=last_beat {
-        let x = origin.x + px(beat as f32 * BEAT_W - scroll_x);
+    // Bold bar lines — one per bar, numbered by the ruler.
+    let first_bar = (scroll_x / bar_w).floor().max(0.0) as i64;
+    let last_bar = ((scroll_x + width) / bar_w).ceil() as i64;
+    for bar in first_bar..=last_bar {
+        let x = origin.x + px(bar as f32 * bar_w - scroll_x);
         window.paint_quad(quad(
             gpui::Bounds { origin: point(x, origin.y), size: size(px(1.0), px(height)) },
             px(0.0),
-            Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.16 },
+            Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.2 },
             px(0.0),
             gpui::transparent_black(),
             Default::default(),

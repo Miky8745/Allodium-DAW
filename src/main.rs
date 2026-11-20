@@ -18,10 +18,11 @@ mod widgets;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{App, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};
+use gpui::{App, Bounds, KeyBinding, WindowBounds, WindowOptions, prelude::*, px, size};
 
 use audio::AudioEngine;
 use shell::AppShell;
+use toolbar::TogglePlayback;
 
 fn main() {
     let engine = match AudioEngine::new() {
@@ -41,6 +42,13 @@ fn main() {
         // required once, before any window that uses a styled component.
         // See `docs/stage-10-gpui-component.md`.
         gpui::init(cx);
+
+        // Space toggles playback from anywhere in the window — bound with
+        // no context (`None`) since there's no per-panel play/stop
+        // meaning to scope it to; `shell::AppShell`'s root div is where
+        // key dispatch starts by default (see its `focus_handle` field)
+        // and carries the matching `on_action`.
+        cx.bind_keys([KeyBinding::new("space", TogglePlayback, None)]);
 
         // gpui-component's default theme is light; switch to dark first
         // (its own dark palette — near-black backgrounds, neutral grays —

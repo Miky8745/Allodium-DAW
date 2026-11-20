@@ -1041,6 +1041,19 @@ impl AudioEngine {
         let steps_per_sec = bpm / 60.0 * 4.0;
         samples / sr * steps_per_sec
     }
+
+    /// Jumps the transport clock to `step` — the Playlist ruler's
+    /// click-to-seek. Works whether playing or stopped (the scheduler
+    /// picks up the new position on its very next frame either way, since
+    /// it only ever reads `samples_played` fresh); has no lasting effect
+    /// if stopped, though, since `play()` always resets to step 0.
+    pub fn seek_to_step(&self, step: f64) {
+        let sr = self.state.sample_rate.load(Ordering::Relaxed).max(1) as f64;
+        let bpm = self.state.bpm_centibeats.load(Ordering::Relaxed) as f64 / 100.0;
+        let steps_per_sec = bpm / 60.0 * 4.0;
+        let samples = (step.max(0.0) / steps_per_sec * sr).round() as u64;
+        self.state.samples_played.store(samples, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]

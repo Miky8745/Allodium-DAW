@@ -53,7 +53,7 @@ use gpui::component::separator::Separator;
 use gpui::component::{Disableable, Icon, Sizable, WindowExt};
 use gpui::{
     BoxShadow, ClickEvent, Context, Hsla, IntoElement, MouseButton, MouseDownEvent, Modifiers,
-    ParentElement, ScrollEvent, Styled, Window, div, point, prelude::*, px,
+    ParentElement, ScrollEvent, Styled, Window, actions, div, point, prelude::*, px,
 };
 use crate::floating_panel::{self, PanelKind, ShellDragMarker};
 use crate::preferences;
@@ -61,6 +61,12 @@ use crate::shell::AppShell;
 use crate::theme;
 
 const MENU_LABELS: [&str; 6] = ["File", "Edit", "View", "Options", "Tools", "Help"];
+
+// Global (`KeyBinding::new("space", TogglePlayback, None)`, bound in
+// `main.rs`) — the keyboard equivalent of clicking the transport row's
+// own Play button (`transport_btn("transport-play", ...)` below), not
+// the separate Pause button's "remembers it was paused" logic.
+actions!(transport, [TogglePlayback]);
 
 // Audio-monitor envelope constants — pulled directly from Allodium-tauri's
 // own `meterMath.ts` (`RELEASE`, `MIN_DB`) and `BlackBox.svelte`
@@ -507,6 +513,13 @@ fn edit_menu(prefs: gpui::Entity<preferences::Preferences>) -> impl IntoElement 
 }
 
 impl AppShell {
+    /// Space's keybinding target (see `TogglePlayback`'s own doc comment)
+    /// — exactly the transport row's Play button's own click handler.
+    pub(crate) fn on_toggle_playback(&mut self, _: &TogglePlayback, _window: &mut Window, cx: &mut Context<Self>) {
+        self.channel_rack.update(cx, |cr, cx| cr.toggle_play(cx));
+        cx.notify();
+    }
+
     fn toggle_pause(&mut self, cx: &mut Context<Self>) {
         let playing = self.channel_rack.read(cx).is_playing();
         if playing {
