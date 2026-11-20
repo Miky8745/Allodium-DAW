@@ -13,7 +13,7 @@ use crate::theme;
 use crate::widgets::{dial, scroll_field};
 
 use super::drag::ParamKind;
-use super::{ChannelRack, STEP_COUNT};
+use super::{ChannelRack, ChannelRackEvent, STEP_COUNT};
 
 /// Same per-entry-unique-id scheme as `piano_roll.rs`'s own `next_note_id`
 /// — duplicated rather than shared, since each is private to its own
@@ -102,18 +102,23 @@ impl ChannelRack {
     }
 
     /// Single-solo, matching the original: soloing one channel clears
-    /// every other channel's solo instead of allowing several at once.
+    /// every other channel's solo instead of allowing several at once —
+    /// except ctrl+clicking the mute button of the channel *already*
+    /// soloed this way un-solos back to whatever was soloed right before,
+    /// rather than just clearing everything (see `pre_solo_state`'s own
+    /// doc comment).
     fn toggle_solo(&mut self, channel_id: u32, cx: &mut Context<Self>) {
-        let now_soloed = self
-            .project
-            .channels
-            .items
-            .iter()
-            .find(|c| c.id == channel_id)
-            .map(|c| !c.soloed)
-            .unwrap_or(false);
-        for ch in &mut self.project.channels.items {
-            ch.soloed = now_soloed && ch.id == channel_id;
+        let was_soloed = self.project.channels.items.iter().find(|c| c.id == channel_id).map(|c| c.soloed).unwrap_or(false);
+        if was_soloed {
+            let restore = self.pre_solo_state.take().unwrap_or_default();
+            for ch in &mut self.project.channels.items {
+                ch.soloed = restore.contains(&ch.id);
+            }
+        } else {
+            self.pre_solo_state = Some(self.project.channels.items.iter().filter(|c| c.soloed).map(|c| c.id).collect());
+            for ch in &mut self.project.channels.items {
+                ch.soloed = ch.id == channel_id;
+            }
         }
         self.push_snapshot();
         self.save();
@@ -394,8 +399,7 @@ impl ChannelRack {
                     .h(px(12.0))
                     .rounded_full()
                     .cursor_pointer()
-                    .bg(if ch.muted { theme::BTN_BORDER } else { theme::accent() })
-                    .when(ch.soloed, |d| d.shadow(crate::toolbar::glow(theme::accent())).border_2().border_color(theme::accent()))
+                    .bg(if ch.soloed { theme::secondary() } else if ch.muted { theme::BTN_BORDER } else { theme::accent() })
                     .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                         if ev.modifiers().control {
                             this.toggle_solo(id, cx);
@@ -406,29 +410,41 @@ impl ChannelRack {
             )
             .child(dial(
                 ("pan", id as usize),
+                ParamKind::Pan.name(),
+                ParamKind::Pan.value_text(ch.pan),
                 ch.pan,
                 ParamKind::Pan.max(),
                 ParamKind::Pan.sweep_start(),
                 ParamKind::Pan.sweep_degrees(),
                 24.0,
                 cx.listener(move |this, ev: &MouseDownEvent, _, _| this.begin_param_drag(id, ParamKind::Pan, f32::from(ev.position.y))),
-                cx.listener(move |this, ev: &ClickEvent, _, cx| {
-                    if ev.click_count() >= 2 {
-                        this.reset_param(id, ParamKind::Pan, cx);
+                {
+                    let rack = rack.clone();
+                    move |_: &mut Window, cx: &mut App| rack.update(cx, |r, cx| r.reset_param(id, ParamKind::Pan, cx))
+                },
+                cx.listener(move |_this, (hovering, name, value): &(bool, &'static str, String), _, cx| {
+                    if *hovering {
+                        cx.emit(ChannelRackEvent::HoverInfo(name, value.clone()));
                     }
                 }),
             ))
             .child(dial(
                 ("volume", id as usize),
+                ParamKind::Volume.name(),
+                ParamKind::Volume.value_text(ch.volume),
                 ch.volume,
                 ParamKind::Volume.max(),
                 ParamKind::Volume.sweep_start(),
                 ParamKind::Volume.sweep_degrees(),
                 24.0,
                 cx.listener(move |this, ev: &MouseDownEvent, _, _| this.begin_param_drag(id, ParamKind::Volume, f32::from(ev.position.y))),
-                cx.listener(move |this, ev: &ClickEvent, _, cx| {
-                    if ev.click_count() >= 2 {
-                        this.reset_param(id, ParamKind::Volume, cx);
+                {
+                    let rack = rack.clone();
+                    move |_: &mut Window, cx: &mut App| rack.update(cx, |r, cx| r.reset_param(id, ParamKind::Volume, cx))
+                },
+                cx.listener(move |_this, (hovering, name, value): &(bool, &'static str, String), _, cx| {
+                    if *hovering {
+                        cx.emit(ChannelRackEvent::HoverInfo(name, value.clone()));
                     }
                 }),
             ))

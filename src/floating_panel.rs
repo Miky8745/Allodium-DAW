@@ -115,10 +115,34 @@ pub struct PanelGeometry {
     pub pre_maximize: Option<(Point<Pixels>, Size<Pixels>)>,
 }
 
+/// Which side(s) of the panel a resize handle grows/shrinks — a corner
+/// handle sets two of these, an edge handle just one. `update_drag`
+/// (`shell.rs`) reads this to decide whether a side also has to move
+/// `position`, not just `size` (the top/left sides do, same as a window
+/// manager's own edge/corner resize).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResizeEdge {
+    pub top: bool,
+    pub right: bool,
+    pub bottom: bool,
+    pub left: bool,
+}
+
+impl ResizeEdge {
+    pub const TOP: Self = Self { top: true, right: false, bottom: false, left: false };
+    pub const RIGHT: Self = Self { top: false, right: true, bottom: false, left: false };
+    pub const BOTTOM: Self = Self { top: false, right: false, bottom: true, left: false };
+    pub const LEFT: Self = Self { top: false, right: false, bottom: false, left: true };
+    pub const TOP_LEFT: Self = Self { top: true, right: false, bottom: false, left: true };
+    pub const TOP_RIGHT: Self = Self { top: true, right: true, bottom: false, left: false };
+    pub const BOTTOM_LEFT: Self = Self { top: false, right: false, bottom: true, left: true };
+    pub const BOTTOM_RIGHT: Self = Self { top: false, right: true, bottom: true, left: false };
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum PanelDragKind {
     Move,
-    Resize,
+    Resize(ResizeEdge),
 }
 
 #[derive(Clone, Copy)]
@@ -133,6 +157,14 @@ pub struct PanelDrag {
 pub const MIN_PANEL_SIZE: Size<Pixels> = Size { width: px(280.0), height: px(160.0) };
 const TITLE_BAR_H: Pixels = px(26.0);
 const RESIZE_HANDLE_SIZE: Pixels = px(14.0);
+const EDGE_HANDLE_THICKNESS: Pixels = px(6.0);
+
+/// A stable per-edge-combination offset for the resize handles' element
+/// ids (`panel-resize-edge`/`panel-resize-corner` are each shared across
+/// 4 handles, so the id needs to vary by handle, not just by panel).
+fn edge_tag(edge: ResizeEdge) -> usize {
+    (edge.top as usize) | (edge.right as usize) << 1 | (edge.bottom as usize) << 2 | (edge.left as usize) << 3
+}
 
 /// Allodium-tauri's own floating windows always carry a real two-layer
 /// drop shadow (`box-shadow: 0 16px 48px rgba(8,10,20,0.45)` — a tight
@@ -178,7 +210,7 @@ pub fn render_panel(
     body: impl IntoElement,
     on_focus: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     on_drag_start: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-    on_resize_start: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    on_resize_start: impl Fn(&(ResizeEdge, MouseDownEvent), &mut Window, &mut App) + 'static,
     // Cancels a pending move/resize that never crossed GPUI's own drag
     // threshold (a plain click) — see `ShellDragMarker`'s doc comment and
     // `AppShell::cancel_pending_click`. Separate callbacks, one per
@@ -301,26 +333,73 @@ pub fn render_panel(
         )
         .child(div().flex_1().w_full().rounded_b(radius).overflow_hidden().child(body))
         .when(!geometry.maximized, |d| {
-            d.child(
-                div()
-                    .id(("panel-resize", kind as u8 as usize))
-                    .absolute()
-                    .right_0()
-                    .bottom_0()
-                    .w(RESIZE_HANDLE_SIZE)
-                    .h(RESIZE_HANDLE_SIZE)
-                    .flex()
-                    .items_end()
-                    .justify_end()
-                    .px(px(2.0))
-                    .pb(px(1.0))
-                    .cursor_default()
-                    .text_color(theme::accent_dim().alpha(0.35))
-                    .hover(|s| s.text_color(theme::accent_dim()))
-                    .child(Icon::new(IconName::ResizeCorner).xsmall())
-                    .on_mouse_down(MouseButton::Left, on_resize_start)
-                    .on_mouse_up(MouseButton::Left, on_resize_release)
-                    .on_drag(ShellDragMarker, drag_preview),
-            )
+            // Shared across all 8 handles below, so each needs its own
+            // clone to move into its own `on_mouse_down`/`on_mouse_up`
+            // closure — `Rc` rather than requiring callers to make these
+            // `Clone` themselves.
+            let on_resize_start = std::rc::Rc::new(on_resize_start);
+            let on_resize_release = std::rc::Rc::new(on_resize_release);
+            let edge_handle = {
+                let on_resize_start = on_resize_start.clone();
+                let on_resize_release = on_resize_release.clone();
+                move |edge: ResizeEdge| {
+                    let on_resize_start = on_resize_start.clone();
+                    let on_resize_release = on_resize_release.clone();
+                    div()
+                        .id(("panel-resize-edge", kind as u8 as usize * 100 + edge_tag(edge)))
+                        .absolute()
+                        .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, cx| {
+                            on_resize_start(&(edge, ev.clone()), window, cx)
+                        })
+                        .on_mouse_up(MouseButton::Left, move |ev, window, cx| on_resize_release(ev, window, cx))
+                        .on_drag(ShellDragMarker, drag_preview)
+                }
+            };
+            let corner_handle = {
+                let on_resize_start = on_resize_start.clone();
+                let on_resize_release = on_resize_release.clone();
+                move |edge: ResizeEdge| {
+                    let on_resize_start = on_resize_start.clone();
+                    let on_resize_release = on_resize_release.clone();
+                    div()
+                        .id(("panel-resize-corner", kind as u8 as usize * 100 + edge_tag(edge)))
+                        .absolute()
+                        .w(RESIZE_HANDLE_SIZE)
+                        .h(RESIZE_HANDLE_SIZE)
+                        .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, cx| {
+                            on_resize_start(&(edge, ev.clone()), window, cx)
+                        })
+                        .on_mouse_up(MouseButton::Left, move |ev, window, cx| on_resize_release(ev, window, cx))
+                        .on_drag(ShellDragMarker, drag_preview)
+                }
+            };
+            d.child(edge_handle(ResizeEdge::TOP).top_0().left(RESIZE_HANDLE_SIZE).right(RESIZE_HANDLE_SIZE).h(EDGE_HANDLE_THICKNESS).cursor_n_resize())
+                .child(
+                    edge_handle(ResizeEdge::BOTTOM)
+                        .bottom_0()
+                        .left(RESIZE_HANDLE_SIZE)
+                        .right(RESIZE_HANDLE_SIZE)
+                        .h(EDGE_HANDLE_THICKNESS)
+                        .cursor_s_resize(),
+                )
+                .child(edge_handle(ResizeEdge::LEFT).left_0().top(RESIZE_HANDLE_SIZE).bottom(RESIZE_HANDLE_SIZE).w(EDGE_HANDLE_THICKNESS).cursor_w_resize())
+                .child(edge_handle(ResizeEdge::RIGHT).right_0().top(RESIZE_HANDLE_SIZE).bottom(RESIZE_HANDLE_SIZE).w(EDGE_HANDLE_THICKNESS).cursor_e_resize())
+                .child(corner_handle(ResizeEdge::TOP_LEFT).top_0().left_0().cursor_nwse_resize())
+                .child(corner_handle(ResizeEdge::TOP_RIGHT).top_0().right_0().cursor_nesw_resize())
+                .child(corner_handle(ResizeEdge::BOTTOM_LEFT).bottom_0().left_0().cursor_nesw_resize())
+                .child(
+                    corner_handle(ResizeEdge::BOTTOM_RIGHT)
+                        .bottom_0()
+                        .right_0()
+                        .cursor_nwse_resize()
+                        .flex()
+                        .items_end()
+                        .justify_end()
+                        .px(px(2.0))
+                        .pb(px(1.0))
+                        .text_color(theme::accent_dim().alpha(0.35))
+                        .hover(|s| s.text_color(theme::accent_dim()))
+                        .child(Icon::new(IconName::ResizeCorner).xsmall()),
+                )
         })
 }

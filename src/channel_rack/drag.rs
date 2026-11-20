@@ -6,7 +6,7 @@
 
 use gpui::{Context, Pixels, Point};
 
-use super::{ChannelRack, DIAL_SENSITIVITY};
+use super::{ChannelRack, ChannelRackEvent, DIAL_SENSITIVITY};
 
 /// Which per-channel knob a drag is turning — governs its range and reset
 /// value. Matches `ChannelRow.svelte`'s own two `Dial`s exactly (same
@@ -46,6 +46,23 @@ impl ParamKind {
         match self {
             ParamKind::Pan => 300.0,
             ParamKind::Volume => 180.0,
+        }
+    }
+
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            ParamKind::Pan => "Pan",
+            ParamKind::Volume => "Volume",
+        }
+    }
+
+    /// The same formatting the dial's own hover/menu label uses — shared
+    /// so a value dragged live updates the info panel with text that
+    /// matches what hovering it afterward would show.
+    pub(super) fn value_text(self, value: f64) -> String {
+        match self {
+            ParamKind::Pan => format!("{:+.2}", value - self.default_value()),
+            ParamKind::Volume => format!("{:.0}%", value / self.max() * 100.0),
         }
     }
 }
@@ -126,11 +143,13 @@ impl ChannelRack {
                     }
                 }
                 self.push_snapshot();
+                cx.emit(ChannelRackEvent::HoverInfo(drag.kind.name(), drag.kind.value_text(new_value)));
                 cx.notify();
             }
             Some(ActiveDrag::Swing(drag)) => {
                 let dy = drag.start_mouse_y - f32::from(mouse.y);
                 self.swing = (drag.start_value + (dy / DIAL_SENSITIVITY) as f64).clamp(0.0, 1.0);
+                cx.emit(ChannelRackEvent::HoverInfo("Swing", format!("{:.0}%", self.swing * 100.0)));
                 cx.notify();
             }
             Some(ActiveDrag::ColResize(drag)) => {

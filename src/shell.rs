@@ -19,7 +19,7 @@ use crate::audio::AudioEngine;
 use crate::channel_rack::ChannelRack;
 use crate::file_browser::FileBrowser;
 use crate::floating_panel::{
-    self, PanelDrag, PanelDragKind, PanelGeometry, PanelKind, ShellDragMarker, MIN_PANEL_SIZE,
+    self, PanelDrag, PanelDragKind, PanelGeometry, PanelKind, ResizeEdge, ShellDragMarker, MIN_PANEL_SIZE,
 };
 use crate::mixer::Mixer;
 use crate::perf::FrameStats;
@@ -134,6 +134,13 @@ struct TempoDrag {
 impl AppShell {
     pub fn new(engine: Arc<AudioEngine>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let channel_rack = cx.new(|cx| ChannelRack::new(engine, window, cx));
+        cx.subscribe(&channel_rack, |this: &mut Self, _rack, event: &crate::channel_rack::ChannelRackEvent, cx| match event {
+            crate::channel_rack::ChannelRackEvent::HoverInfo(name, value) => {
+                this.toolbar.hover = Some((name, value.clone()));
+                cx.notify();
+            }
+        })
+        .detach();
         let piano_roll = cx.new(|cx| PianoRoll::new(channel_rack.clone(), window, cx));
         let playlist = cx.new(|cx| Playlist::new(channel_rack.clone(), window, cx));
         let mixer = cx.new(|cx| Mixer::new(channel_rack.clone(), window, cx));
@@ -360,9 +367,30 @@ impl AppShell {
                 geo.position.x = (drag.start_position.x + dx).max(px(0.0));
                 geo.position.y = (drag.start_position.y + dy).max(px(0.0));
             }
-            PanelDragKind::Resize => {
-                geo.size.width = (drag.start_size.width + dx).max(MIN_PANEL_SIZE.width);
-                geo.size.height = (drag.start_size.height + dy).max(MIN_PANEL_SIZE.height);
+            PanelDragKind::Resize(edge) => {
+                // The right/bottom sides just grow or shrink `size` in
+                // place; left/top also have to slide `position` to keep
+                // the *opposite* edge fixed, the same way a window
+                // manager's own edge/corner resize works — mirrors the
+                // `Move` arm's own `>= 0` clamp, since dragging either of
+                // these two is otherwise indistinguishable from moving
+                // the panel while also resizing it.
+                if edge.right {
+                    geo.size.width = (drag.start_size.width + dx).max(MIN_PANEL_SIZE.width);
+                }
+                if edge.bottom {
+                    geo.size.height = (drag.start_size.height + dy).max(MIN_PANEL_SIZE.height);
+                }
+                if edge.left {
+                    let new_width = (drag.start_size.width - dx).max(MIN_PANEL_SIZE.width);
+                    geo.position.x = (drag.start_position.x + (drag.start_size.width - new_width)).max(px(0.0));
+                    geo.size.width = new_width;
+                }
+                if edge.top {
+                    let new_height = (drag.start_size.height - dy).max(MIN_PANEL_SIZE.height);
+                    geo.position.y = (drag.start_position.y + (drag.start_size.height - new_height)).max(px(0.0));
+                    geo.size.height = new_height;
+                }
             }
         }
         cx.notify();
@@ -472,7 +500,9 @@ impl Render for AppShell {
                 body,
                 cx.listener(move |this, _: &MouseDownEvent, _, cx| this.focus_panel(kind, cx)),
                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.begin_drag(kind, PanelDragKind::Move, ev.position, cx)),
-                cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.begin_drag(kind, PanelDragKind::Resize, ev.position, cx)),
+                cx.listener(move |this, (edge, ev): &(ResizeEdge, MouseDownEvent), _, cx| {
+                    this.begin_drag(kind, PanelDragKind::Resize(*edge), ev.position, cx)
+                }),
                 cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| this.cancel_pending_click(cx)),
                 cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| this.cancel_pending_click(cx)),
                 cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_maximize(kind, cx)),

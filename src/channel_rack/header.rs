@@ -10,12 +10,12 @@ use gpui::assets::IconName;
 use gpui::component::button::{Button, ButtonVariants};
 use gpui::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui::component::{Icon, Sizable};
-use gpui::{ClickEvent, Context, Div, MouseButton, MouseDownEvent, ParentElement, ScrollEvent, Styled, div, prelude::*, px};
+use gpui::{App, ClickEvent, Context, Div, MouseButton, MouseDownEvent, ParentElement, ScrollEvent, Styled, Window, div, prelude::*, px};
 
 use crate::theme;
 use crate::widgets::{dial, group_label, icon_toggle, scroll_field};
 
-use super::{ChannelRack, RackFilter};
+use super::{ChannelRack, ChannelRackEvent, RackFilter};
 
 impl ChannelRack {
     /// The selected pattern's length, in whole bars (its own `length_beats`
@@ -166,16 +166,26 @@ impl ChannelRack {
                             .gap_0p5()
                             .child(dial(
                                 "swing",
+                                "Swing",
+                                format!("{:.0}%", self.swing * 100.0),
                                 self.swing,
                                 1.0,
                                 210.0,
                                 300.0,
                                 26.0,
                                 cx.listener(|this, ev: &MouseDownEvent, _, _| this.begin_swing_drag(f32::from(ev.position.y))),
-                                cx.listener(|this, ev: &ClickEvent, _, cx| {
-                                    if ev.click_count() >= 2 {
-                                        this.swing = 0.0;
-                                        cx.notify();
+                                {
+                                    let rack = rack.clone();
+                                    move |_: &mut Window, cx: &mut App| {
+                                        rack.update(cx, |r, cx| {
+                                            r.swing = 0.0;
+                                            cx.notify();
+                                        })
+                                    }
+                                },
+                                cx.listener(|_this, (hovering, name, value): &(bool, &'static str, String), _, cx| {
+                                    if *hovering {
+                                        cx.emit(ChannelRackEvent::HoverInfo(name, value.clone()));
                                     }
                                 }),
                             ))

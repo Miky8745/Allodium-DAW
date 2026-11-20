@@ -49,12 +49,23 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::component::input::{InputEvent, InputState};
-use gpui::{Context, Entity, IntoElement, Render, Window, prelude::*};
+use gpui::component::scroll::ScrollableElement;
+use gpui::{Context, Entity, EventEmitter, IntoElement, Render, Window, prelude::*};
 
 use crate::audio::{self, AudioEngine, SampleBuffer};
 use crate::project::{self, Channel, PatternContentEntry, ProjectFile};
 
 use drag::ActiveDrag;
+
+/// Emitted for anything outside the Channel Rack that needs to react to
+/// it — today just a dial's hover info, relayed by `AppShell` into the
+/// toolbar's own hover-info readout (`ToolbarState::hover`), the same
+/// sink every other hoverable control in the app already reports to.
+pub enum ChannelRackEvent {
+    HoverInfo(&'static str, String),
+}
+
+impl EventEmitter<ChannelRackEvent> for ChannelRack {}
 
 const STEP_COUNT: usize = 16;
 const PROJECT_NAME: &str = "default";
@@ -101,6 +112,13 @@ pub struct ChannelRack {
     /// rewrite's stand-in for the original's real RNG (`randomColorfulHex`),
     /// without pulling in a `rand` dependency for one button.
     recolor_seed: u32,
+    /// Which channels were soloed right before the last ctrl+click-to-solo
+    /// overrode them — ctrl+clicking that same channel's mute button again
+    /// un-solos it back to exactly this set instead of just clearing every
+    /// solo, so a quick "let me hear just this one" doesn't lose whichever
+    /// solo you had going before it. Cleared once restored; overwritten
+    /// (not stacked) if you solo a different channel before reverting.
+    pre_solo_state: Option<Vec<u32>>,
     /// The step sequencer's last-seen integer step and when it last
     /// changed, so each row can fade its fired step's flash out over
     /// wall-clock time rather than it just sitting lit for as long as the
@@ -161,6 +179,7 @@ impl ChannelRack {
             graph_editor: false,
             piano_roll_overview: false,
             recolor_seed: 0,
+            pre_solo_state: None,
             last_step_index: -1,
             last_step_change: std::time::Instant::now(),
         };
@@ -371,7 +390,7 @@ impl Render for ChannelRack {
 
         let header = self.render_header(cx);
 
-        let mut rows = div().flex().flex_col();
+        let mut rows = div().size_full().flex().flex_col();
         for (idx, id) in channel_ids.iter().copied().enumerate() {
             rows = rows.child(self.render_row(idx, id, playing, current_step, fired_fade, pattern_id, name_col_width, &rack, cx));
         }
@@ -391,7 +410,7 @@ impl Render for ChannelRack {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
             .child(header)
-            .child(div().flex_1().overflow_hidden().child(rows))
+            .child(div().flex_1().overflow_hidden().child(rows.overflow_y_scrollbar()))
             .child(footer)
     }
 }

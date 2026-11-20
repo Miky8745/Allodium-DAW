@@ -7,11 +7,13 @@
 //! of these in without inheriting anything about Channel Rack, Mixer, or
 //! whatever else already uses it.
 //!
-//! Each widget returns a plain `Div`, not `impl IntoElement`, so a caller
-//! can keep chaining builder methods (an extra `.on_hover(...)`, a
-//! `.shadow(...)`) onto the result instead of needing its own near-
-//! identical copy just to add one thing — see `toolbar::toggle`'s own use
-//! of `icon_toggle` for exactly that.
+//! Most of these return a plain `Div` so a caller can keep chaining
+//! builder methods (an extra `.on_hover(...)`, a `.shadow(...)`) onto the
+//! result instead of needing its own near-identical copy just to add one
+//! thing — see `toolbar::toggle`'s own use of `icon_toggle` for exactly
+//! that. `dial` is the one exception: its own right-click "reset" menu
+//! wraps the div in `ContextMenu<Div>`, so it returns `impl IntoElement`
+//! instead.
 
 mod dial;
 mod group_label;

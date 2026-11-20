@@ -6,6 +6,7 @@
 //! No insert-effect rack, no multi-target routing, no strip renaming, per
 //! `../daw-rewrite-starter/stages/07-mixer.md`'s explicit scope cut.
 
+use gpui::component::scroll::ScrollableElement;
 use gpui::{
     ClickEvent, Context, Entity, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Render, Styled, Window, div, prelude::*, px,
@@ -247,7 +248,7 @@ impl Render for Mixer {
 
         div()
             .size_full()
-            .overflow_hidden()
+            .overflow_x_scrollbar()
             .bg(theme::BG_APP)
             // Rounds its own bottom corners to match the floating panel's
             // outer rounded edge — GPUI's overflow clip is a plain
