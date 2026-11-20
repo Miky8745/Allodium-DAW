@@ -669,46 +669,116 @@ pub struct AudioEngine {
     system_error: Mutex<Option<String>>,
 }
 
-/// Picks the `StreamConfig` to open the device with, by actually
-/// probing: build (and immediately drop) a throwaway F32 output stream
-/// for each candidate until one succeeds. We can't rely on
+/// Picks the `(StreamConfig, SampleFormat)` to open the device with, by
+/// actually probing: build (and immediately drop) a throwaway output
+/// stream for each candidate until one succeeds. We can't rely on
 /// `supported_output_configs()` to tell us up front — on some Windows
 /// WASAPI drivers, its own internal check of the device's default mix
 /// format fails outright ("Could not determine support for default
 /// `WAVEFORMATEX`"), even though `build_output_stream` happily accepts
-/// a plain 2-channel/44.1kHz or 48kHz config for the very same device.
-/// `default_output_config()` itself doesn't do that check, so it's
-/// always tried first — on Linux this succeeds immediately and the
-/// probe is a single cheap open+drop.
-fn select_output_config(device: &cpal::Device) -> Result<cpal::StreamConfig, String> {
+/// a plain config for the very same device. `default_output_config()`
+/// itself doesn't do that check, so its config/format are always tried
+/// first — on Linux this succeeds immediately and the probe is a
+/// single cheap open+drop. If the device's own default format isn't
+/// accepted either (observed on some Windows drivers), we also try
+/// common sample formats besides F32, since a handful of drivers only
+/// accept shared-mode streams in an integer format.
+fn select_output_config(device: &cpal::Device) -> Result<(cpal::StreamConfig, cpal::SampleFormat), String> {
     let default_config = device.default_output_config().map_err(|e| e.to_string())?;
+    let default_format = default_config.sample_format();
     let default_stream_config: cpal::StreamConfig = default_config.into();
 
-    let mut candidates = vec![default_stream_config.clone()];
+    let mut configs = vec![default_stream_config.clone()];
     for &channels in &[default_stream_config.channels, 2, 1] {
         for &rate in &[default_stream_config.sample_rate.0, 48_000, 44_100] {
             let candidate = cpal::StreamConfig { channels, sample_rate: cpal::SampleRate(rate), buffer_size: cpal::BufferSize::Default };
-            if !candidates.contains(&candidate) {
-                candidates.push(candidate);
+            if !configs.contains(&candidate) {
+                configs.push(candidate);
             }
         }
     }
 
-    for candidate in candidates {
-        let probe = device.build_output_stream(&candidate, |_data: &mut [f32], _: &cpal::OutputCallbackInfo| {}, |_err| {}, None);
-        if probe.is_ok() {
-            return Ok(candidate);
+    let mut formats = vec![default_format];
+    for &fmt in &[cpal::SampleFormat::F32, cpal::SampleFormat::I16, cpal::SampleFormat::U16, cpal::SampleFormat::I32] {
+        if !formats.contains(&fmt) {
+            formats.push(fmt);
+        }
+    }
+
+    for format in &formats {
+        for config in &configs {
+            let probe = probe_output_stream(device, config, *format);
+            if probe.is_ok() {
+                return Ok((config.clone(), *format));
+            }
         }
     }
 
     Err("no output stream configuration the device would accept".to_string())
 }
 
+fn probe_output_stream(device: &cpal::Device, config: &cpal::StreamConfig, format: cpal::SampleFormat) -> Result<cpal::Stream, cpal::BuildStreamError> {
+    match format {
+        cpal::SampleFormat::F32 => device.build_output_stream(config, |_: &mut [f32], _: &cpal::OutputCallbackInfo| {}, |_| {}, None),
+        cpal::SampleFormat::I16 => device.build_output_stream(config, |_: &mut [i16], _: &cpal::OutputCallbackInfo| {}, |_| {}, None),
+        cpal::SampleFormat::U16 => device.build_output_stream(config, |_: &mut [u16], _: &cpal::OutputCallbackInfo| {}, |_| {}, None),
+        cpal::SampleFormat::I32 => device.build_output_stream(config, |_: &mut [i32], _: &cpal::OutputCallbackInfo| {}, |_| {}, None),
+        _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
+    }
+}
+
+/// Builds the real output stream for whichever `(config, format)`
+/// `select_output_config` settled on. `render` fills one callback's
+/// worth of interleaved f32 samples; for any format besides F32 those
+/// get converted into a same-length scratch-to-output pass so the
+/// mixing/scheduling logic in `render` only ever has to deal with f32.
+fn build_output_stream_for(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    format: cpal::SampleFormat,
+    mut render: impl FnMut(&mut [f32]) + Send + 'static,
+    error_callback: impl FnMut(cpal::StreamError) + Send + 'static,
+) -> Result<cpal::Stream, cpal::BuildStreamError> {
+    fn converting<T: cpal::SizedSample + cpal::FromSample<f32>>(
+        device: &cpal::Device,
+        config: &cpal::StreamConfig,
+        mut render: impl FnMut(&mut [f32]) + Send + 'static,
+        error_callback: impl FnMut(cpal::StreamError) + Send + 'static,
+    ) -> Result<cpal::Stream, cpal::BuildStreamError> {
+        let mut scratch: Vec<f32> = Vec::new();
+        device.build_output_stream(
+            config,
+            move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+                scratch.resize(data.len(), 0.0);
+                render(&mut scratch);
+                for (out, &sample) in data.iter_mut().zip(scratch.iter()) {
+                    *out = T::from_sample(sample);
+                }
+            },
+            error_callback,
+            None,
+        )
+    }
+
+    match format {
+        cpal::SampleFormat::F32 => device.build_output_stream(
+            config,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| render(data),
+            error_callback,
+            None,
+        ),
+        cpal::SampleFormat::I16 => converting::<i16>(device, config, render, error_callback),
+        cpal::SampleFormat::U16 => converting::<u16>(device, config, render, error_callback),
+        cpal::SampleFormat::I32 => converting::<i32>(device, config, render, error_callback),
+        _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
+    }
+}
+
 impl AudioEngine {
     pub fn new() -> Result<Self, String> {
         let host = cpal::default_host();
         let device = host.default_output_device().ok_or_else(|| "no default audio output device".to_string())?;
-        let config = select_output_config(&device)?;
+        let (config, sample_format) = select_output_config(&device)?;
         let out_sample_rate = config.sample_rate.0;
         let out_channels = config.channels as usize;
 
@@ -751,10 +821,11 @@ impl AudioEngine {
         let mut bus_l: Vec<f32> = vec![0.0];
         let mut bus_r: Vec<f32> = vec![0.0];
 
-        let stream = device
-            .build_output_stream(
-                &config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+        let stream = build_output_stream_for(
+            &device,
+            &config,
+            sample_format,
+            move |data: &mut [f32]| {
                     for msg in receiver.try_iter() {
                         match msg {
                             EngineMessage::UpdateContent {
@@ -938,11 +1009,10 @@ impl AudioEngine {
                             }
                         }
                     }
-                },
-                |err| eprintln!("[audio] stream error: {err}"),
-                None,
-            )
-            .map_err(|e| e.to_string())?;
+            },
+            |err| eprintln!("[audio] stream error: {err}"),
+        )
+        .map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
 
         let system_meter = Arc::new(MeterState::new());
