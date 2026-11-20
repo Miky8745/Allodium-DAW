@@ -40,6 +40,19 @@ use crate::theme;
 /// always runs from the repo root.
 const DATA_ROOT: &str = "data";
 
+/// The subfolders every checkout is expected to have under `data/`
+/// (samples/projects/plugins tabs) — all three are gitignored, so a
+/// fresh clone or a different machine won't have them yet. Created on
+/// startup if missing so the tabs always show up rather than silently
+/// disappearing.
+const DATA_SUBFOLDERS: &[&str] = &["samples", "projects", "plugins"];
+
+fn ensure_data_folders() {
+    for name in DATA_SUBFOLDERS {
+        let _ = fs::create_dir_all(Path::new(DATA_ROOT).join(name));
+    }
+}
+
 /// This panel's own identity color (gold) — carried over from when it was
 /// still a `PanelKind` variant in `floating_panel.rs`; kept here now that
 /// it's docked instead, since the toolbar's show/hide pill and this
@@ -127,6 +140,7 @@ pub struct FileBrowser {
 
 impl FileBrowser {
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+        ensure_data_folders();
         let mut tabs: Vec<(String, PathBuf)> = fs::read_dir(DATA_ROOT)
             .ok()
             .into_iter()
