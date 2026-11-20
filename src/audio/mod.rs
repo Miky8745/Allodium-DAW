@@ -669,11 +669,46 @@ pub struct AudioEngine {
     system_error: Mutex<Option<String>>,
 }
 
+/// Picks the output config to open the device with. On Linux this is
+/// almost always just `default_output_config()` as-is. On Windows,
+/// WASAPI drivers have been observed to report a default config that
+/// isn't actually one of the ranges `supported_output_configs()` lists,
+/// which makes `build_output_stream` reject it with "the requested
+/// stream configuration is not supported by the device" even though the
+/// device works fine — so validate the default against the enumerated
+/// ranges first, and fall back to the first (highest-rate) F32 range if
+/// it doesn't check out.
+fn select_output_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
+    let default_config = device.default_output_config().map_err(|e| e.to_string())?;
+
+    let default_is_supported = device
+        .supported_output_configs()
+        .map(|mut configs| {
+            configs.any(|range| {
+                range.channels() == default_config.channels()
+                    && range.sample_format() == default_config.sample_format()
+                    && default_config.sample_rate() >= range.min_sample_rate()
+                    && default_config.sample_rate() <= range.max_sample_rate()
+            })
+        })
+        .unwrap_or(false);
+
+    if default_is_supported {
+        return Ok(default_config);
+    }
+
+    let mut configs: Vec<_> = device.supported_output_configs().map_err(|e| e.to_string())?.collect();
+    configs.sort_by_key(|r| r.sample_format() != cpal::SampleFormat::F32);
+    let fallback_range = configs.into_iter().next().ok_or_else(|| "no supported output configuration".to_string())?;
+
+    Ok(fallback_range.with_max_sample_rate())
+}
+
 impl AudioEngine {
     pub fn new() -> Result<Self, String> {
         let host = cpal::default_host();
         let device = host.default_output_device().ok_or_else(|| "no default audio output device".to_string())?;
-        let config = device.default_output_config().map_err(|e| e.to_string())?;
+        let config = select_output_config(&device)?;
         let out_sample_rate = config.sample_rate().0;
         let out_channels = config.channels() as usize;
 
