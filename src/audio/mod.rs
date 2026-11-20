@@ -118,6 +118,11 @@ pub struct ChannelVoiceData {
 pub struct PlaybackSnapshot {
     pub channels: Vec<ChannelVoiceData>,
     pub pattern_length_steps: u32,
+    /// Project-wide, not pattern-scoped, but piggybacked onto this
+    /// snapshot (rather than its own message) since `push_snapshot` already
+    /// rebuilds it on every edit, including `set_beats_per_bar` — see
+    /// `AudioEngine::set_metronome`'s doc comment for how this is used.
+    pub steps_per_bar: u32,
 }
 
 /// One mixer-bus strip's audio-thread-ready data (Master itself is
@@ -196,7 +201,7 @@ pub fn build_snapshot(
         })
         .collect();
 
-    Ok(PlaybackSnapshot { channels, pattern_length_steps })
+    Ok(PlaybackSnapshot { channels, pattern_length_steps, steps_per_bar: project.beats_per_bar.max(1) * 4 })
 }
 
 /// A currently-sounding one-shot: a sample, an envelope, and a playback
@@ -314,6 +319,25 @@ fn trigger_channel_step(ch: &ChannelVoiceData, step: i64, bpm: f64, out_sample_r
     }
 }
 
+/// Synthesizes a short decaying sine-burst click for the metronome, rather
+/// than shipping/downloading a pre-recorded sample — the only sound this
+/// engine needs that isn't user-provided content. The decay is baked
+/// directly into the sample data (down to silence well before the buffer
+/// ends) so it can play through `Voice`/`Envelope::ring` exactly like any
+/// other one-shot, with no separate envelope concept for metronome voices.
+fn synth_click(sample_rate: u32, freq: f32) -> Arc<SampleBuffer> {
+    const DURATION_SECS: f32 = 0.05;
+    const DECAY_TAU_SECS: f32 = 0.012;
+    let frame_count = (DURATION_SECS * sample_rate as f32) as usize;
+    let data: Vec<f32> = (0..frame_count)
+        .map(|i| {
+            let t = i as f32 / sample_rate as f32;
+            (2.0 * std::f32::consts::PI * freq * t).sin() * (-t / DECAY_TAU_SECS).exp()
+        })
+        .collect();
+    Arc::new(SampleBuffer { channels: 1, sample_rate, data })
+}
+
 /// Resolves a channel/voice's `bus` id to a slot in the per-frame
 /// accumulator: an unknown or `0` id falls back to `master_idx` (the
 /// default "straight to Master" behavior, and a safety net if a bus was
@@ -337,6 +361,11 @@ struct PlaybackState {
     /// to.
     song_mode: AtomicBool,
     song_length_steps: AtomicU32,
+    /// Toolbar's metronome toggle — read once per new scheduled step inside
+    /// the audio callback, same live-flag convention as `playing`/`song_
+    /// mode`, rather than threaded through as a per-snapshot field (it has
+    /// no content to rebuild, just an on/off read).
+    metronome: AtomicBool,
 }
 
 /// Toolbar's audio monitor + peak meter (`src/toolbar.rs`'s `oscilloscope`
@@ -569,7 +598,7 @@ enum EngineMessage {
     /// Replaces the content the scheduler plays from — pushed on every
     /// step/volume/pan/mute/solo/channel-list edit so changes take effect
     /// immediately without interrupting playback position.
-    UpdateContent { channels: Vec<ChannelVoiceData>, pattern_length_steps: u32 },
+    UpdateContent { channels: Vec<ChannelVoiceData>, pattern_length_steps: u32, steps_per_bar: u32 },
     /// A one-shot outside the scheduler, for click-to-audition. Plays
     /// regardless of transport state.
     Preview { sample: Arc<SampleBuffer>, volume: f32, pan: f32 },
@@ -622,15 +651,23 @@ impl AudioEngine {
             pattern_length_steps: AtomicU32::new(16),
             song_mode: AtomicBool::new(false),
             song_length_steps: AtomicU32::new(16),
+            metronome: AtomicBool::new(false),
         });
 
         let meter = Arc::new(MeterState::new());
+
+        // One quiet regular click and one louder, higher-pitched accent —
+        // distinguished by pitch/volume rather than a second recorded
+        // sample, since both are synthesized (see `synth_click`).
+        let click_sample = synth_click(out_sample_rate, 1500.0);
+        let accent_sample = synth_click(out_sample_rate, 2200.0);
 
         let (sender, receiver) = mpsc::channel::<EngineMessage>();
         let callback_state = state.clone();
         let callback_meter = meter.clone();
         let mut channels: Vec<ChannelVoiceData> = Vec::new();
         let mut pattern_length_steps: i64 = 16;
+        let mut steps_per_bar: i64 = 16;
         let mut song_placements: Vec<SongPlacementVoiceData> = Vec::new();
         let mut song_length_steps: i64 = 16;
         let mut voices: Vec<Voice> = Vec::new();
@@ -650,9 +687,14 @@ impl AudioEngine {
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     for msg in receiver.try_iter() {
                         match msg {
-                            EngineMessage::UpdateContent { channels: new_channels, pattern_length_steps: new_len } => {
+                            EngineMessage::UpdateContent {
+                                channels: new_channels,
+                                pattern_length_steps: new_len,
+                                steps_per_bar: new_bar,
+                            } => {
                                 channels = new_channels;
                                 pattern_length_steps = new_len.max(1) as i64;
+                                steps_per_bar = new_bar.max(1) as i64;
                             }
                             EngineMessage::Preview { sample, volume, pan } => {
                                 voices.push(Voice::new(sample, 1.0, volume, pan, Envelope::ring(out_sample_rate), out_sample_rate, 0));
@@ -677,6 +719,41 @@ impl AudioEngine {
                             let bpm = callback_state.bpm_centibeats.load(Ordering::Relaxed) as f64 / 100.0;
                             let steps_per_sec = bpm / 60.0 * 4.0;
                             let whole_step = (t * steps_per_sec).floor() as i64;
+                            let is_new_step = whole_step != last_triggered_step;
+
+                            // One click per quarter note (every 4 sixteenth
+                            // steps, the fixed step convention everywhere
+                            // else in this engine), accented on beat 1 of
+                            // every bar — ticks on the absolute step clock
+                            // so it stays steady across a pattern loop or a
+                            // song-mode arrangement alike, independent of
+                            // the mode-specific triggering below. Read
+                            // before either branch below updates
+                            // `last_triggered_step`, so it never
+                            // double-fires on the same step.
+                            if is_new_step && callback_state.metronome.load(Ordering::Relaxed) && whole_step >= 0 {
+                                if whole_step % steps_per_bar == 0 {
+                                    voices.push(Voice::new(
+                                        accent_sample.clone(),
+                                        1.0,
+                                        0.9,
+                                        0.5,
+                                        Envelope::ring(out_sample_rate),
+                                        out_sample_rate,
+                                        0,
+                                    ));
+                                } else if whole_step % 4 == 0 {
+                                    voices.push(Voice::new(
+                                        click_sample.clone(),
+                                        1.0,
+                                        0.7,
+                                        0.5,
+                                        Envelope::ring(out_sample_rate),
+                                        out_sample_rate,
+                                        0,
+                                    ));
+                                }
+                            }
 
                             if callback_state.song_mode.load(Ordering::Relaxed) {
                                 // Song mode: play the arrangement once,
@@ -893,7 +970,14 @@ impl AudioEngine {
         let _ = self.sender.send(EngineMessage::UpdateContent {
             channels: snapshot.channels,
             pattern_length_steps: snapshot.pattern_length_steps,
+            steps_per_bar: snapshot.steps_per_bar,
         });
+    }
+
+    /// Toolbar's metronome toggle. Takes effect on the very next scheduled
+    /// step, no restart needed — same live-flag convention as `set_bpm`.
+    pub fn set_metronome(&self, enabled: bool) {
+        self.state.metronome.store(enabled, Ordering::Relaxed);
     }
 
     pub fn play(&self, bpm: f64) {

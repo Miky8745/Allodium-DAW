@@ -39,6 +39,7 @@ const DEFAULT_SAMPLES: &[(&str, &str)] = &[
     ("Ride.ogg", "drums/ride01.ogg"),
     ("Tom.ogg", "drums/tom_mid01.ogg"),
     ("Rim.ogg", "drums/rim01.ogg"),
+    ("Wood.ogg", "drums/wood01.ogg"),
     ("Bass.ogg", "basses/bass01.ogg"),
 ];
 

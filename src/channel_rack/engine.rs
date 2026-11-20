@@ -13,6 +13,10 @@ impl ChannelRack {
         self.engine.is_playing()
     }
 
+    pub fn set_metronome(&self, enabled: bool) {
+        self.engine.set_metronome(enabled);
+    }
+
     pub fn tempo(&self) -> f64 {
         self.project.tempo
     }

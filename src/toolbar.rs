@@ -32,9 +32,12 @@
 //! `Toolbar.svelte` with no further consumption shown there either — those
 //! are ported at that same fidelity: a real, persistent, click-to-toggle
 //! control, just not driving a scheduler/audio feature that doesn't
-//! exist yet in this rewrite. Metronome goes one step further and ports
-//! the original's one real side effect (turning it on auto-starts
-//! playback). The Explorer panel toggle now opens the real File
+//! exist yet in this rewrite. Metronome goes one step further: it's backed
+//! by a real audible click in the audio engine (`audio::AudioEngine::
+//! set_metronome`, a synthesized accent/regular click scheduled once per
+//! quarter note in the render callback) and ports the original's one real
+//! side effect (turning it on auto-starts playback). The Explorer panel
+//! toggle now opens the real File
 //! Browser panel (`src/file_browser.rs`, MVP item #8) via the same
 //! `AppShell::toggle_pill` the other floating panels use, just in its
 //! own dedicated slot ahead of that generic pill cluster rather than
@@ -516,12 +519,13 @@ impl AppShell {
         cx.notify();
     }
 
-    /// Ports the original's one real side effect of flipping this
-    /// switch: turning the metronome on auto-starts playback if it
-    /// isn't already running (there's no audible click yet — no
-    /// metronome-tick scheduling exists in the audio engine).
+    /// Ports the original's one real side effect of flipping this switch:
+    /// turning the metronome on auto-starts playback if it isn't already
+    /// running, so enabling it is heard immediately instead of silently
+    /// arming; turning it back off does not stop playback.
     fn toggle_metronome(&mut self, cx: &mut Context<Self>) {
         self.toolbar.metronome = !self.toolbar.metronome;
+        self.channel_rack.update(cx, |cr, _| cr.set_metronome(self.toolbar.metronome));
         if self.toolbar.metronome && !self.channel_rack.read(cx).is_playing() {
             self.channel_rack.update(cx, |cr, cx| cr.toggle_play(cx));
         }
