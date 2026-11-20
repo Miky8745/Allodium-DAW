@@ -292,13 +292,9 @@ impl ChannelRack {
         };
         self.samples.insert(path_str.clone(), sample);
         let Some(ch) = self.project.channels.items.iter_mut().find(|c| c.id == channel_id) else { return };
-        // A channel with no sample yet shows as the "Drop sample"
-        // placeholder label (see `row.rs`'s own `name_label`) with no name
-        // of its own to preserve, so this is the one case an assign also
-        // picks the channel's name, same as a freshly added channel would.
-        if ch.sample_path.is_empty() {
-            ch.name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Channel".to_string());
-        }
+        // Dropping a sample onto a channel renames it to match, same as a
+        // freshly added channel would be named after its sample.
+        ch.name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Channel".to_string());
         ch.sample_path = path_str;
         self.audition(channel_id);
         self.push_snapshot();

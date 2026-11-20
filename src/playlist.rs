@@ -255,10 +255,12 @@ impl Playlist {
     /// empty, `pattern_id` 0) the same way clicking empty grid space
     /// creates a pattern placement, just with its length computed from
     /// the sample's own real duration (`frame_count / sample_rate`
-    /// seconds, converted to beats at the project's current tempo) and
-    /// rounded to the nearest whole beat — matching this grid's existing
-    /// whole-beat placement granularity — instead of looked up from a
-    /// pattern.
+    /// seconds, converted to beats at the project's current tempo)
+    /// instead of looked up from a pattern. Kept as the exact continuous
+    /// value, *not* snapped to a whole beat — the block should be exactly
+    /// as long as the sample actually plays for at this tempo, not fitted
+    /// to the grid (only the clip's *start* snaps to a whole beat, same
+    /// as every other placement).
     fn handle_sample_drop(&mut self, payload: &SampleDragPayload, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
         let (beat, track) = self.pointer_to_grid(position);
         if track < 0 || track as u32 >= TRACK_COUNT {
@@ -274,7 +276,7 @@ impl Playlist {
         };
         let tempo = self.channel_rack.read(cx).tempo();
         let duration_secs = sample.frame_count() as f64 / sample.sample_rate as f64;
-        let length_beats = (duration_secs * tempo / 60.0).round().max(1.0);
+        let length_beats = (duration_secs * tempo / 60.0).max(0.01);
         if self.overlaps(beat, length_beats, track as u32, None, cx) {
             return;
         }
