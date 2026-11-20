@@ -23,9 +23,11 @@
 //! `dial`/`scroll_field`/`icon_toggle` controls those UI files build with
 //! are themselves in `crate::widgets`, not duplicated per call site.
 //!
-//! Deliberately **not** ported from the original: drag-and-drop file
-//! import (no file-explorer panel exists here to drag *from*), the
-//! growable/trimmable global step count (`Add steps…`/`Trim steps` —
+//! Deliberately **not** ported from the original: the file-picker-based
+//! channel creation ("+ Channel" now always creates an empty channel; the
+//! only way to give it a sound is dragging a sample onto it from the File
+//! Browser), the growable/trimmable global step count (`Add steps…`/`Trim
+//! steps` —
 //! every pattern entry here stays a fixed `STEP_COUNT`), the mini note-
 //! roll row preview for note-based channels, the horizontal scrollbar,
 //! and the plugin/MIDI-out sections of the row context menu (no plugin
@@ -198,14 +200,35 @@ impl ChannelRack {
         self.engine.preview(sample.clone(), ch.volume as f32, ch.pan as f32);
     }
 
+    /// "+ Channel" creates an empty channel outright — no sample picker —
+    /// so the only way to give it a sound is dragging a file onto it from
+    /// the File Browser (`row.rs`'s `assign_sample` drop target). Shows up
+    /// as the row's "Drop sample" placeholder until then.
     fn add_channel(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("audio", &["wav", "ogg", "mp3", "flac"])
-            .pick_file()
-        else {
-            return;
-        };
-        self.add_channel_from_path(path, cx);
+        let id = self.next_channel_id;
+        self.next_channel_id += 1;
+        self.project.channels.items.push(Channel {
+            id,
+            name: String::new(),
+            sample_path: String::new(),
+            muted: false,
+            soloed: false,
+            pan: 0.5,
+            volume: 0.8,
+            mixer_track: 0,
+            color: 0,
+        });
+        let pattern_id = self.project.selected_pattern_id;
+        self.project.content.items.push(PatternContentEntry {
+            pattern_id,
+            channel_id: id,
+            steps: vec![false; STEP_COUNT],
+            notes: vec![],
+        });
+
+        self.selected_channel_id = Some(id);
+        self.save();
+        cx.notify();
     }
 
     /// Shared by the `rfd` file picker (`add_channel`) and dropping a
