@@ -705,16 +705,20 @@ fn select_output_config(device: &cpal::Device) -> Result<(cpal::StreamConfig, cp
         }
     }
 
+    let mut last_err = String::new();
     for format in &formats {
         for config in &configs {
-            let probe = probe_output_stream(device, config, *format);
-            if probe.is_ok() {
-                return Ok((config.clone(), *format));
+            match probe_output_stream(device, config, *format) {
+                Ok(_) => return Ok((config.clone(), *format)),
+                Err(e) => {
+                    last_err = format!("{format:?} {}ch@{}Hz: {e}", config.channels, config.sample_rate.0);
+                    eprintln!("[audio] probe failed: {last_err}");
+                }
             }
         }
     }
 
-    Err("no output stream configuration the device would accept".to_string())
+    Err(format!("no output stream configuration the device would accept (last attempt: {last_err})"))
 }
 
 fn probe_output_stream(device: &cpal::Device, config: &cpal::StreamConfig, format: cpal::SampleFormat) -> Result<cpal::Stream, cpal::BuildStreamError> {
