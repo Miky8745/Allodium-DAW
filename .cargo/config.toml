@@ -1,0 +1,6 @@
+# Statically link the MSVC CRT into the Windows binary so the built
+# .exe has no vcruntime140.dll/msvcp140.dll dependency — only matters
+# for the windows-msvc target, so Linux builds (this repo's primary
+# dev flow, via `nix-shell --run "cargo build"`) are unaffected.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
