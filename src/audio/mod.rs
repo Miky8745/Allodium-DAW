@@ -685,6 +685,13 @@ pub struct AudioEngine {
 /// accept shared-mode streams in an integer format.
 fn select_output_config(device: &cpal::Device) -> Result<(cpal::StreamConfig, cpal::SampleFormat), String> {
     let default_config = device.default_output_config().map_err(|e| e.to_string())?;
+    eprintln!(
+        "[audio] device {:?}, default config: {:?}ch @ {}Hz, {:?}",
+        device.name().unwrap_or_else(|_| "<unknown>".to_string()),
+        default_config.channels(),
+        default_config.sample_rate().0,
+        default_config.sample_format(),
+    );
     let default_format = default_config.sample_format();
     let default_stream_config: cpal::StreamConfig = default_config.into();
 
