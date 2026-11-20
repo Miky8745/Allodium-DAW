@@ -289,7 +289,15 @@ impl ChannelRack {
                     .h(px(28.0))
                     .rounded(theme::RADIUS_XS)
                     .bg(bg)
-                    .when(is_current, |d| d.border_2().border_color(theme::accent_text()))
+                    // The playhead marker: a bright ring around whichever
+                    // step is currently playing. `accent_text()` (a
+                    // near-black tint, meant for text drawn *on top of* an
+                    // accent-filled surface) reads as an almost invisible
+                    // black outline here instead of a highlight — use the
+                    // same lightened `accent_hover()` the "just fired"
+                    // select-indicator flash already uses, so the playhead
+                    // is actually visible against every step color.
+                    .when(is_current, |d| d.border_2().border_color(theme::accent_hover()))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::BG_PILL_HOVER))
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| this.set_step(id, i, true, cx)))

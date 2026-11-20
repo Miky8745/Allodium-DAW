@@ -601,12 +601,28 @@ impl Render for Playlist {
                                     move |bounds, _, window, _| {
                                         grid_origin.set(bounds.origin);
                                         grid_size.set(bounds.size);
-                                        paint_lanes(window, bounds, scroll_x, scroll_y, beats_per_bar, song_step);
+                                        paint_lanes(window, bounds, scroll_x, scroll_y, beats_per_bar);
                                     },
                                 )
                                 .size_full(),
                             )
                             .child(block_layer)
+                            .child(
+                                // `.absolute()` is load-bearing: this
+                                // parent div isn't a flex container, so a
+                                // plain `.size_full()` sibling here would
+                                // stack in normal block flow *below* the
+                                // grid canvas above (which only looks like
+                                // an overlay because it's the sole child
+                                // before `block_layer`'s own `.absolute()`
+                                // takes it out of flow) — pushed below the
+                                // visible, clipped area entirely instead of
+                                // overlaying on top of it.
+                                div().absolute().left_0().top_0().size_full().child(
+                                    canvas(move |_, _, _| {}, move |bounds, _, window, _| paint_playhead(window, bounds, scroll_x, song_step))
+                                        .size_full(),
+                                ),
+                            )
                             // Drag a sample straight from the File Browser
                             // onto the timeline — reuses the same payload
                             // type Channel Rack rows/footer already drop
@@ -658,21 +674,16 @@ impl Render for Playlist {
     }
 }
 
-/// Vertical bar-group striping + beat/bar gridlines + thin row separators +
-/// the Song-mode playhead. Placement blocks themselves are plain `div()`s
-/// layered on top (see `render`) rather than hand-painted, unlike the
-/// Piano Roll — there are only ever a handful of them, so GPUI's own text
-/// layout for pattern-name labels is simpler than hand-shaping text into a
-/// `canvas`. The ruler above the grid (also built in `render`) numbers the
-/// same bold bar lines this paints.
-fn paint_lanes(
-    window: &mut Window,
-    bounds: gpui::Bounds<gpui::Pixels>,
-    scroll_x: f32,
-    scroll_y: f32,
-    beats_per_bar: u32,
-    song_step: f64,
-) {
+/// Vertical bar-group striping + beat/bar gridlines + thin row separators.
+/// Placement blocks themselves are plain `div()`s layered on top (see
+/// `render`) rather than hand-painted, unlike the Piano Roll — there are
+/// only ever a handful of them, so GPUI's own text layout for
+/// pattern-name labels is simpler than hand-shaping text into a `canvas`.
+/// The ruler above the grid (also built in `render`) numbers the same
+/// bold bar lines this paints. The Song-mode playhead is `paint_playhead`,
+/// a separate canvas painted after the placement blocks instead of here —
+/// see its own doc comment for why.
+fn paint_lanes(window: &mut Window, bounds: gpui::Bounds<gpui::Pixels>, scroll_x: f32, scroll_y: f32, beats_per_bar: u32) {
     let width = f32::from(bounds.size.width);
     let height = f32::from(bounds.size.height);
     let origin = bounds.origin;
@@ -747,21 +758,32 @@ fn paint_lanes(
         ));
     }
 
-    // Song-mode playhead; meaningless (and hidden) in pattern mode, same
-    // as the original's documented behavior.
-    if song_step >= 0.0 {
-        let song_beat = song_step / 4.0;
-        let playhead_x = origin.x + px(song_beat as f32 * BEAT_W - scroll_x);
-        if f32::from(playhead_x - origin.x) >= 0.0 && f32::from(playhead_x - origin.x) <= width {
-            window.paint_quad(quad(
-                gpui::Bounds { origin: point(playhead_x, origin.y), size: size(px(2.0), px(height)) },
-                px(0.0),
-                Hsla { h: 0.0, s: 0.8, l: 0.6, a: 0.9 },
-                px(0.0),
-                gpui::transparent_black(),
-                Default::default(),
-            ));
-        }
+}
+
+/// The Song-mode playhead; meaningless (and hidden) in pattern mode, same
+/// as the original's documented behavior. Painted in its own canvas,
+/// layered *after* `block_layer` in `render` rather than inside
+/// `paint_lanes` (which paints *before* it) — otherwise the playhead line
+/// would be stuck drawing underneath every placement block instead of
+/// sweeping across on top of them.
+fn paint_playhead(window: &mut Window, bounds: gpui::Bounds<gpui::Pixels>, scroll_x: f32, song_step: f64) {
+    if song_step < 0.0 {
+        return;
+    }
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    let origin = bounds.origin;
+    let song_beat = song_step / 4.0;
+    let playhead_x = origin.x + px(song_beat as f32 * BEAT_W - scroll_x);
+    if f32::from(playhead_x - origin.x) >= 0.0 && f32::from(playhead_x - origin.x) <= width {
+        window.paint_quad(quad(
+            gpui::Bounds { origin: point(playhead_x, origin.y), size: size(px(2.0), px(height)) },
+            px(0.0),
+            Hsla { h: 0.0, s: 0.8, l: 0.6, a: 0.9 },
+            px(0.0),
+            gpui::transparent_black(),
+            Default::default(),
+        ));
     }
 }
 
