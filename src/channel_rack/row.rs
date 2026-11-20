@@ -4,7 +4,7 @@
 
 use gpui::component::input::Input;
 use gpui::component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui::{App, ClickEvent, Context, Div, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent, ParentElement, ScrollEvent, Styled, Window, div, prelude::*, px};
+use gpui::{App, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, ParentElement, ScrollEvent, Styled, Window, div, prelude::*, px};
 
 use crate::color_utils::{contrast_text_color, hsl_to_rgb_u32};
 use crate::file_browser::SampleDragPayload;
@@ -29,6 +29,19 @@ fn next_note_id(notes: &[Note]) -> u32 {
 /// start at the same step; see `set_step`'s doc comment.
 fn step_note_index(notes: &[Note], step: usize) -> Option<usize> {
     notes.iter().position(|n| n.pitch == STEP_PITCH && n.length == 1.0 && n.start as usize == step)
+}
+
+/// Blends two colors channel-by-channel, `t = 0` giving `from` and `t = 1`
+/// giving `to` — used to fade a just-fired step's flash back down to its
+/// resting color.
+fn lerp_hsla(from: Hsla, to: Hsla, t: f32) -> Hsla {
+    let t = t.clamp(0.0, 1.0);
+    Hsla {
+        h: from.h + (to.h - from.h) * t,
+        s: from.s + (to.s - from.s) * t,
+        l: from.l + (to.l - from.l) * t,
+        a: from.a + (to.a - from.a) * t,
+    }
 }
 
 impl ChannelRack {
@@ -219,8 +232,9 @@ impl ChannelRack {
         &mut self,
         idx: usize,
         id: u32,
-        playing: bool,
+        _playing: bool,
         current_step: i64,
+        fired_fade: f32,
         pattern_id: u32,
         name_col_width: f32,
         rack: &Entity<ChannelRack>,
@@ -239,7 +253,7 @@ impl ChannelRack {
         let mut step_row = div().flex().flex_row().gap_1();
         for i in 0..STEP_COUNT {
             let on = step_note_index(&notes, i).is_some();
-            let is_current = playing && current_step == i as i64;
+            let is_current = current_step == i as i64;
             // 4-step beat-group banding, matching the Piano Roll's own
             // beat-group shading — the two grids should read as one
             // system, not two unrelated ones.
@@ -438,16 +452,26 @@ impl ChannelRack {
             )
             .child(sample_box)
             .child(
-                div()
-                    .id(("select", id as usize))
-                    .w(px(14.0))
-                    .h(px(14.0))
-                    .rounded(theme::RADIUS_XS)
-                    .border_1()
-                    .border_color(if is_multi_selected { theme::accent() } else { theme::BTN_BORDER })
-                    .bg(if is_multi_selected { theme::accent() } else { gpui::transparent_black() })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| this.select_row(idx, id, ev.modifiers(), cx))),
+                {
+                    // Lights up when this channel fires a hit on the
+                    // current step, then fades back down over
+                    // `fired_fade`'s decay window — a per-channel "it just
+                    // played" indicator, not a static selection box.
+                    let channel_fired = current_step >= 0 && step_note_index(&notes, current_step as usize).is_some();
+                    let flash = if channel_fired { fired_fade } else { 0.0 };
+                    let resting_bg = if is_multi_selected { theme::accent() } else { gpui::transparent_black() };
+                    let bg = if flash > 0.0 { lerp_hsla(resting_bg, theme::accent_hover(), flash) } else { resting_bg };
+                    div()
+                        .id(("select", id as usize))
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .rounded(theme::RADIUS_XS)
+                        .border_1()
+                        .border_color(if is_multi_selected { theme::accent() } else { theme::BTN_BORDER })
+                        .bg(bg)
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| this.select_row(idx, id, ev.modifiers(), cx)))
+                },
             )
             .child(step_row)
     }

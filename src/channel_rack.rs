@@ -101,6 +101,12 @@ pub struct ChannelRack {
     /// rewrite's stand-in for the original's real RNG (`randomColorfulHex`),
     /// without pulling in a `rand` dependency for one button.
     recolor_seed: u32,
+    /// The step sequencer's last-seen integer step and when it last
+    /// changed, so each row can fade its fired step's flash out over
+    /// wall-clock time rather than it just sitting lit for as long as the
+    /// playhead happens to linger on that step.
+    last_step_index: i64,
+    last_step_change: std::time::Instant,
 }
 
 impl ChannelRack {
@@ -155,6 +161,8 @@ impl ChannelRack {
             graph_editor: false,
             piano_roll_overview: false,
             recolor_seed: 0,
+            last_step_index: -1,
+            last_step_change: std::time::Instant::now(),
         };
         rack.push_snapshot();
         rack
@@ -343,6 +351,19 @@ impl Render for ChannelRack {
         let playing = self.engine.is_playing();
         let song_mode = self.engine.is_song_mode();
         let current_step = if playing { self.engine.current_step().floor() as i64 } else { -1 };
+        if current_step != self.last_step_index {
+            self.last_step_index = current_step;
+            self.last_step_change = std::time::Instant::now();
+        }
+        // Each fired step flashes, then fades back to its resting color
+        // over this window — independent of how long the playhead
+        // actually dwells on that step.
+        const STEP_FLASH_FADE_SECS: f32 = 0.18;
+        let fired_fade = if current_step >= 0 {
+            (1.0 - self.last_step_change.elapsed().as_secs_f32() / STEP_FLASH_FADE_SECS).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let channel_ids: Vec<u32> = self.project.channels.items.iter().map(|c| c.id).collect();
         let pattern_id = self.project.selected_pattern_id;
         let name_col_width = self.name_col_width;
@@ -352,7 +373,7 @@ impl Render for ChannelRack {
 
         let mut rows = div().flex().flex_col();
         for (idx, id) in channel_ids.iter().copied().enumerate() {
-            rows = rows.child(self.render_row(idx, id, playing, current_step, pattern_id, name_col_width, &rack, cx));
+            rows = rows.child(self.render_row(idx, id, playing, current_step, fired_fade, pattern_id, name_col_width, &rack, cx));
         }
 
         let footer = self.render_footer(song_mode, cx);
