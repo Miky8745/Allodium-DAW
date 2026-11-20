@@ -669,39 +669,39 @@ pub struct AudioEngine {
     system_error: Mutex<Option<String>>,
 }
 
-/// Picks the output config to open the device with. On Linux this is
-/// almost always just `default_output_config()` as-is. On Windows,
-/// WASAPI drivers have been observed to report a default config that
-/// isn't actually one of the ranges `supported_output_configs()` lists,
-/// which makes `build_output_stream` reject it with "the requested
-/// stream configuration is not supported by the device" even though the
-/// device works fine — so validate the default against the enumerated
-/// ranges first, and fall back to the first (highest-rate) F32 range if
-/// it doesn't check out.
-fn select_output_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
+/// Picks the `StreamConfig` to open the device with, by actually
+/// probing: build (and immediately drop) a throwaway F32 output stream
+/// for each candidate until one succeeds. We can't rely on
+/// `supported_output_configs()` to tell us up front — on some Windows
+/// WASAPI drivers, its own internal check of the device's default mix
+/// format fails outright ("Could not determine support for default
+/// `WAVEFORMATEX`"), even though `build_output_stream` happily accepts
+/// a plain 2-channel/44.1kHz or 48kHz config for the very same device.
+/// `default_output_config()` itself doesn't do that check, so it's
+/// always tried first — on Linux this succeeds immediately and the
+/// probe is a single cheap open+drop.
+fn select_output_config(device: &cpal::Device) -> Result<cpal::StreamConfig, String> {
     let default_config = device.default_output_config().map_err(|e| e.to_string())?;
+    let default_stream_config: cpal::StreamConfig = default_config.into();
 
-    let default_is_supported = device
-        .supported_output_configs()
-        .map(|mut configs| {
-            configs.any(|range| {
-                range.channels() == default_config.channels()
-                    && range.sample_format() == default_config.sample_format()
-                    && default_config.sample_rate() >= range.min_sample_rate()
-                    && default_config.sample_rate() <= range.max_sample_rate()
-            })
-        })
-        .unwrap_or(false);
-
-    if default_is_supported {
-        return Ok(default_config);
+    let mut candidates = vec![default_stream_config.clone()];
+    for &channels in &[default_stream_config.channels, 2, 1] {
+        for &rate in &[default_stream_config.sample_rate.0, 48_000, 44_100] {
+            let candidate = cpal::StreamConfig { channels, sample_rate: cpal::SampleRate(rate), buffer_size: cpal::BufferSize::Default };
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
     }
 
-    let mut configs: Vec<_> = device.supported_output_configs().map_err(|e| e.to_string())?.collect();
-    configs.sort_by_key(|r| r.sample_format() != cpal::SampleFormat::F32);
-    let fallback_range = configs.into_iter().next().ok_or_else(|| "no supported output configuration".to_string())?;
+    for candidate in candidates {
+        let probe = device.build_output_stream(&candidate, |_data: &mut [f32], _: &cpal::OutputCallbackInfo| {}, |_err| {}, None);
+        if probe.is_ok() {
+            return Ok(candidate);
+        }
+    }
 
-    Ok(fallback_range.with_max_sample_rate())
+    Err("no output stream configuration the device would accept".to_string())
 }
 
 impl AudioEngine {
@@ -709,8 +709,8 @@ impl AudioEngine {
         let host = cpal::default_host();
         let device = host.default_output_device().ok_or_else(|| "no default audio output device".to_string())?;
         let config = select_output_config(&device)?;
-        let out_sample_rate = config.sample_rate().0;
-        let out_channels = config.channels() as usize;
+        let out_sample_rate = config.sample_rate.0;
+        let out_channels = config.channels as usize;
 
         let state = Arc::new(PlaybackState {
             playing: AtomicBool::new(false),
@@ -753,7 +753,7 @@ impl AudioEngine {
 
         let stream = device
             .build_output_stream(
-                &config.into(),
+                &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     for msg in receiver.try_iter() {
                         match msg {
