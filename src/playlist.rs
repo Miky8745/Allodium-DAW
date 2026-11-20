@@ -108,14 +108,21 @@ impl Playlist {
         }
     }
 
+    /// A pattern's displayed/placed length in the Playlist: its content
+    /// (every channel's notes), rounded up to a whole bar — never the
+    /// trailing spare bar `ChannelRack::sync_pattern_length` always pads
+    /// `length_beats` with for editing. Everything that cares how long a
+    /// placed pattern is (block width/paint, overlap checks, drag hit-
+    /// testing) reads this instead of the pattern's raw stored length,
+    /// so a placement is never drawn, or collides, wider than what it
+    /// actually plays.
     fn pattern_length_beats(&self, pattern_id: u32, cx: &Context<Self>) -> f64 {
-        self.channel_rack
-            .read(cx)
-            .patterns()
-            .iter()
-            .find(|p| p.id == pattern_id)
-            .map(|p| p.length_beats)
-            .unwrap_or(4.0)
+        let rack = self.channel_rack.read(cx);
+        let bar_beats = rack.beats_per_bar().max(1) as f64;
+        let bar_steps = bar_beats * 4.0;
+        let used_steps = rack.pattern_notes(pattern_id).iter().map(|n| n.start + n.length).fold(0.0_f64, f64::max);
+        let used_bars = (used_steps / bar_steps).ceil();
+        used_bars.max(1.0) * bar_beats
     }
 
     fn content_width(&self, cx: &Context<Self>) -> f32 {
@@ -330,7 +337,7 @@ impl Render for Playlist {
         let song_step = if song_mode && playing { rack.song_step() } else { -1.0 };
         let beats_per_bar = rack.beats_per_bar().max(1);
         let patterns: Vec<(u32, String, f64)> =
-            rack.patterns().iter().map(|p| (p.id, p.name.clone(), p.length_beats)).collect();
+            rack.patterns().iter().map(|p| (p.id, p.name.clone(), self.pattern_length_beats(p.id, cx))).collect();
 
         let pattern_list = rack.patterns();
         let blocks: Vec<(Placement, String)> =

@@ -54,14 +54,16 @@ pub struct SongSnapshot {
     pub song_length_steps: u32,
 }
 
-/// Builds the song-mode schedule from every Playlist placement, simplified
-/// per `stages/06-playlist.md`: each pattern placement's length is its
-/// pattern's *nominal* `length_beats`, not the original's content-driven
-/// "longest channel's reach" computation. Noted as a deliberate
-/// simplification in `PROGRESS.md`, not a forgotten feature. A `Placement`
-/// with a non-empty `sample_path` is a clip, not a pattern block — it's
-/// collected into `clips` instead, using its own stored `length_beats`
-/// rather than looking one up from a pattern.
+/// Builds the song-mode schedule from every Playlist placement. Each
+/// pattern placement's length is its content-driven length (every
+/// channel's notes, rounded up to a whole bar — see
+/// `pattern_content_length_steps`), matching what the Playlist actually
+/// draws for that placement, not the pattern's own stored `length_beats`
+/// (which `ChannelRack::sync_pattern_length` deliberately pads with one
+/// spare empty bar for editing — that bar is never meant to play). A
+/// `Placement` with a non-empty `sample_path` is a clip, not a pattern
+/// block — it's collected into `clips` instead, using its own stored
+/// `length_beats` rather than looking one up from a pattern.
 pub fn build_song_snapshot(project: &ProjectFile, samples: &HashMap<String, Arc<SampleBuffer>>) -> SongSnapshot {
     let any_soloed = project.channels.items.iter().any(|c| c.soloed);
     let steps_per_bar = project.beats_per_bar.max(1) * 4;
@@ -81,7 +83,7 @@ pub fn build_song_snapshot(project: &ProjectFile, samples: &HashMap<String, Arc<
         }
 
         let Some(pattern) = project.patterns.items.iter().find(|p| p.id == placement.pattern_id) else { continue };
-        let length_steps = (pattern.length_beats * 4.0).round().max(1.0) as u32;
+        let length_steps = pattern_content_length_steps(project, pattern.id);
         let start_step = (placement.start_beat * 4.0).round().max(0.0) as u32;
 
         let channels = project
@@ -182,6 +184,29 @@ pub fn build_mixer_buses(project: &ProjectFile) -> (Vec<MixerBusVoiceData>, f32)
     (buses, project.master_volume as f32)
 }
 
+/// A pattern's actual *playback* length in steps: its content (every
+/// channel's notes, across the whole project, not just one), rounded up
+/// to a whole bar — as opposed to its stored, editable `length_beats`,
+/// which `ChannelRack::sync_pattern_length` deliberately keeps one bar
+/// longer than this so there's always a spare empty bar to edit into.
+/// Using this instead of the nominal length for the scheduler's loop
+/// point means that spare bar is never actually played as a bar of
+/// silence before looping back to step 0. An empty pattern still
+/// reports one bar, not zero, so there's always something to loop.
+fn pattern_content_length_steps(project: &ProjectFile, pattern_id: u32) -> u32 {
+    let steps_per_bar = project.beats_per_bar.max(1) * 4;
+    let used_steps = project
+        .content
+        .items
+        .iter()
+        .filter(|e| e.pattern_id == pattern_id)
+        .flat_map(|e| e.notes.iter())
+        .map(|n| n.start + n.length)
+        .fold(0.0_f64, f64::max);
+    let used_bars = (used_steps / steps_per_bar as f64).ceil() as u32;
+    used_bars.max(1) * steps_per_bar
+}
+
 /// Builds a `PlaybackSnapshot` for the project's currently selected
 /// pattern. A channel with no sample loaded in `samples` is skipped
 /// (silent) rather than erroring — matches the original's "no sample
@@ -196,7 +221,7 @@ pub fn build_snapshot(
         .iter()
         .find(|p| p.id == project.selected_pattern_id)
         .ok_or_else(|| "selected pattern not found".to_string())?;
-    let pattern_length_steps = (pattern.length_beats * 4.0).round().max(1.0) as u32;
+    let pattern_length_steps = pattern_content_length_steps(project, pattern.id);
 
     let any_soloed = project.channels.items.iter().any(|c| c.soloed);
 
@@ -1128,6 +1153,64 @@ mod song_snapshot_tests {
 
         let snapshot = build_song_snapshot(&project, &HashMap::new());
         assert_eq!(snapshot.song_length_steps, 32);
+    }
+
+    #[test]
+    fn placement_length_skips_the_pattern_s_trailing_spare_bar() {
+        use crate::project::{Note, PatternContentEntry};
+
+        let mut project = ProjectFile::default();
+        // Pattern's own stored length is 3 bars (2 content + 1 spare,
+        // same shape `ChannelRack::sync_pattern_length` leaves behind),
+        // but its one note only reaches bar 2 — the placement should
+        // only occupy 2 bars (32 steps), not the padded 3 (48).
+        project.patterns.items.push(Pattern { id: 2, name: "B".to_string(), length_beats: 12.0 });
+        project.content.items.push(PatternContentEntry {
+            pattern_id: 2,
+            channel_id: 1,
+            notes: vec![Note { id: 1, pitch: 60, start: 18.0, length: 2.0, velocity: 1.0 }],
+            ..Default::default()
+        });
+        project.placements.items.push(Placement { id: 1, pattern_id: 2, track_id: 0, start_beat: 0.0, sample_path: String::new(), length_beats: 0.0 });
+
+        let snapshot = build_song_snapshot(&project, &HashMap::new());
+        assert_eq!(snapshot.placements[0].length_steps, 32);
+    }
+}
+
+#[cfg(test)]
+mod pattern_snapshot_tests {
+    use super::*;
+    use crate::project::{Note, PatternContentEntry, ProjectFile};
+
+    #[test]
+    fn an_empty_pattern_loops_one_bar_not_its_nominal_length() {
+        // Default pattern 1 is already 4 beats (16 steps = 1 bar) with no
+        // notes, so this just pins the "zero content -> 1 bar, never 0"
+        // floor rather than exercising a shrink.
+        let project = ProjectFile::default();
+        let snapshot = build_snapshot(&project, &HashMap::new()).unwrap();
+        assert_eq!(snapshot.pattern_length_steps, 16);
+    }
+
+    #[test]
+    fn playback_length_follows_content_not_the_padded_editing_length() {
+        // A note ending at step 20 (mid-way through the pattern's 2nd
+        // bar) needs 2 bars of content, even while `sync_pattern_length`
+        // would keep the pattern's own stored `length_beats` at 3 bars (2
+        // content + 1 spare) for editing — the engine should loop after 2
+        // bars (32 steps), not 3 (48).
+        let mut project = ProjectFile::default();
+        project.patterns.items[0].length_beats = 12.0; // 3 bars @ 4 beats/bar
+        project.content.items.push(PatternContentEntry {
+            pattern_id: 1,
+            channel_id: 1,
+            notes: vec![Note { id: 1, pitch: 60, start: 18.0, length: 2.0, velocity: 1.0 }],
+            ..Default::default()
+        });
+
+        let snapshot = build_snapshot(&project, &HashMap::new()).unwrap();
+        assert_eq!(snapshot.pattern_length_steps, 32);
     }
 }
 

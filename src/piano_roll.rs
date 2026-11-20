@@ -364,7 +364,15 @@ impl PianoRoll {
 
     fn commit_live(&mut self, channel_id: u32, cx: &mut Context<Self>) {
         let notes = self.notes.clone();
-        self.channel_rack.update(cx, |rack, cx| rack.update_notes(channel_id, notes, cx));
+        self.channel_rack.update(cx, |rack, cx| {
+            rack.update_notes(channel_id, notes, cx);
+            // Grows the pattern once a note reaches its current last bar,
+            // or shrinks it back down once trailing bars go empty again
+            // (e.g. after a delete) — always exactly one spare empty bar
+            // past the content, across every channel, not just this one.
+            rack.sync_pattern_length(cx);
+        });
+        self.pattern_length_steps = self.channel_rack.read(cx).pattern_length_steps();
     }
 
     /// A channel-picker dropdown — an easier way to switch which channel

@@ -26,10 +26,12 @@
 //! Deliberately **not** ported from the original: the file-picker-based
 //! channel creation ("+ Channel" now always creates an empty channel; the
 //! only way to give it a sound is dragging a sample onto it from the File
-//! Browser), the growable/trimmable global step count (`Add steps…`/`Trim
-//! steps` —
-//! every pattern entry here stays a fixed `STEP_COUNT`), the mini note-
-//! roll row preview for note-based channels, the horizontal scrollbar,
+//! Browser), the original's manual `Add steps…`/`Trim steps` menu items
+//! (the step row's length instead tracks the selected pattern's own
+//! `length_beats` live, and grows itself by one bar once a step in its
+//! current last bar is used — see `ChannelRack::ensure_spare_bar`), the
+//! mini note-roll row preview for note-based channels, the horizontal
+//! scrollbar,
 //! and the plugin/MIDI-out sections of the row context menu (no plugin
 //! system in this rewrite). Several header toggles (loop start, loop
 //! mode, graph editor, piano-roll overview, the options dropdown, the
@@ -67,7 +69,6 @@ pub enum ChannelRackEvent {
 
 impl EventEmitter<ChannelRackEvent> for ChannelRack {}
 
-const STEP_COUNT: usize = 16;
 const PROJECT_NAME: &str = "default";
 const DIAL_SENSITIVITY: f32 = 150.0; // matches Allodium-tauri's Dial.svelte
 
@@ -410,7 +411,10 @@ impl Render for ChannelRack {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
             .child(header)
-            .child(div().flex_1().overflow_hidden().child(rows.overflow_y_scrollbar()))
+            // Horizontal scroll too, not just vertical: patterns can now
+            // grow past one bar's worth of steps (`ensure_spare_bar`), so a
+            // row's own step grid can be wider than the panel.
+            .child(div().flex_1().overflow_hidden().child(rows.overflow_scrollbar()))
             .child(footer)
     }
 }

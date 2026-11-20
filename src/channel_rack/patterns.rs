@@ -110,6 +110,45 @@ impl ChannelRack {
         self.project.beats_per_bar
     }
 
+    /// How many whole bars of the selected pattern actually hold a note,
+    /// across every channel — the "content length" `sync_pattern_length`
+    /// and `playback_length_steps` both measure against, as opposed to
+    /// the pattern's own stored, editable `length_beats`. `0` means the
+    /// pattern is entirely empty.
+    fn used_bars(&self) -> u32 {
+        let bar_steps = (self.beats_per_bar() as f64) * 4.0;
+        let pattern_id = self.project.selected_pattern_id;
+        let used_steps = self
+            .project
+            .content
+            .items
+            .iter()
+            .filter(|e| e.pattern_id == pattern_id)
+            .flat_map(|e| e.notes.iter())
+            .map(|n| n.start + n.length)
+            .fold(0.0_f64, f64::max);
+        (used_steps / bar_steps).ceil() as u32
+    }
+
+    /// Keeps the selected pattern exactly one bar longer than its last
+    /// used bar: grows it when a note reaches the current last bar, and
+    /// shrinks it back down when trailing bars go empty again (e.g.
+    /// after a delete) — so there's always exactly one spare empty bar
+    /// at the end to sketch a variation into, never more. Call after any
+    /// edit that can add or remove a note in the selected pattern.
+    pub fn sync_pattern_length(&mut self, cx: &mut Context<Self>) {
+        let bar_beats = self.beats_per_bar() as f64;
+        let desired_beats = (self.used_bars() as f64 + 1.0) * bar_beats;
+        let pattern_id = self.project.selected_pattern_id;
+        let Some(p) = self.project.patterns.items.iter_mut().find(|p| p.id == pattern_id) else { return };
+        if p.length_beats != desired_beats {
+            p.length_beats = desired_beats;
+            self.push_snapshot();
+            self.save();
+            cx.notify();
+        }
+    }
+
     /// Backs the header's time-signature scroll field — Allodium-tauri's
     /// own `ScrollField bind:value={channelStore.beatsPerBar} min={1}
     /// max={16}`.

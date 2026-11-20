@@ -13,7 +13,7 @@ use crate::theme;
 use crate::widgets::{dial, scroll_field};
 
 use super::drag::ParamKind;
-use super::{ChannelRack, ChannelRackEvent, STEP_COUNT};
+use super::{ChannelRack, ChannelRackEvent};
 
 /// Same per-entry-unique-id scheme as `piano_roll.rs`'s own `next_note_id`
 /// — duplicated rather than shared, since each is private to its own
@@ -70,6 +70,12 @@ impl ChannelRack {
         if active {
             self.audition(channel_id);
         }
+        // Grows the pattern when a step reaches its current last bar, or
+        // shrinks it back down once trailing bars go empty again (e.g.
+        // right-click-erasing the last note in one) — always exactly one
+        // spare empty bar past the content, mirroring
+        // `PianoRoll::commit_live`'s own call.
+        self.sync_pattern_length(cx);
         self.push_snapshot();
         self.save();
         cx.notify();
@@ -78,15 +84,22 @@ impl ChannelRack {
     /// Fills every Nth step (0, N, 2N, …), clearing the rest — the row
     /// context menu's "Fill every N steps" (N = 2/4/8). Only ever adds/
     /// removes step-shaped notes (see `set_step`'s doc comment); any other
-    /// note the Piano Roll drew for this channel is untouched.
+    /// note the Piano Roll drew for this channel is untouched. Never fills
+    /// the pattern's own last bar — that's always `sync_pattern_length`'s
+    /// spare empty bar, so a fill leaves it empty rather than immediately
+    /// re-triggering its own growth.
     fn fill_every(&mut self, channel_id: u32, n: usize, cx: &mut Context<Self>) {
+        let step_count = self.pattern_length_steps() as usize;
+        let bar_steps = (self.beats_per_bar() as usize) * 4;
+        let fill_count = step_count.saturating_sub(bar_steps);
         let entry = self.content_for(channel_id);
-        entry.notes.retain(|note| !(note.pitch == STEP_PITCH && note.length == 1.0 && (note.start as usize) < STEP_COUNT));
+        entry.notes.retain(|note| !(note.pitch == STEP_PITCH && note.length == 1.0 && (note.start as usize) < step_count));
         let mut next_id = next_note_id(&entry.notes);
-        for i in (0..STEP_COUNT).step_by(n) {
+        for i in (0..fill_count).step_by(n) {
             entry.notes.push(Note { id: next_id, pitch: STEP_PITCH, start: i as f64, length: 1.0, velocity: 1.0 });
             next_id += 1;
         }
+        self.sync_pattern_length(cx);
         self.push_snapshot();
         self.save();
         cx.notify();
@@ -255,8 +268,9 @@ impl ChannelRack {
             .map(|e| e.notes.clone())
             .unwrap_or_default();
 
+        let step_count = self.pattern_length_steps() as usize;
         let mut step_row = div().flex().flex_row().gap_1();
-        for i in 0..STEP_COUNT {
+        for i in 0..step_count {
             let on = step_note_index(&notes, i).is_some();
             let is_current = current_step == i as i64;
             // 4-step beat-group banding, matching the Piano Roll's own
