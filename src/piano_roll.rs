@@ -134,6 +134,15 @@ fn x_to_step(x: f32) -> f64 {
     (x / STEP_W).floor().max(0.0) as f64
 }
 
+/// The horizontal scrollbar's thumb width — proportional to how much of
+/// `content_w` is visible, same ratio a native scrollbar uses, clamped to
+/// a minimum so it never shrinks to an undraggable sliver on a very long
+/// pattern.
+fn h_scrollbar_thumb_width(viewport_w: f32, content_w: f32) -> f32 {
+    const MIN_THUMB_W: f32 = 24.0;
+    (viewport_w / content_w.max(1.0) * viewport_w).clamp(MIN_THUMB_W, viewport_w)
+}
+
 fn is_black_key(pitch: i32) -> bool {
     matches!(pitch.rem_euclid(12), 1 | 3 | 6 | 8 | 10)
 }
@@ -379,6 +388,16 @@ struct ParamDrag {
     start_value: f64,
 }
 
+/// Drag state for the horizontal scrollbar's thumb (`render_h_scrollbar`)
+/// — tracked at the root level the same way `ParamDrag` is, since a drag
+/// has to keep updating even once the cursor leaves the thumb's own
+/// (often narrow) hitbox.
+#[derive(Clone, Copy)]
+struct HScrollDrag {
+    start_mouse_x: f32,
+    start_scroll_x: f32,
+}
+
 pub struct PianoRoll {
     channel_rack: Entity<ChannelRack>,
     loaded_channel_id: Option<u32>,
@@ -420,6 +439,7 @@ pub struct PianoRoll {
     /// being dragged, same vertical-drag-to-value convention as every
     /// other `dial` in this app (`widgets::dial`'s own doc comment).
     param_drag: Option<ParamDrag>,
+    h_scroll_drag: Option<HScrollDrag>,
     dying: Vec<DyingNote>,
     /// The grid canvas's own on-screen origin, captured from its `canvas`
     /// paint closure each frame. Plain `div()`s don't hand their own
@@ -461,6 +481,7 @@ impl PianoRoll {
             show_note_props: true,
             defaults: NoteDefaults::default(),
             param_drag: None,
+            h_scroll_drag: None,
             dying: Vec::new(),
             grid_origin: Rc::new(Cell::new(point(px(0.0), px(0.0)))),
             grid_size: Rc::new(Cell::new(size(px(0.0), px(0.0)))),
@@ -1113,6 +1134,99 @@ impl PianoRoll {
         self.param_drag = None;
     }
 
+    fn begin_h_scroll_drag(&mut self, start_mouse_x: f32) {
+        self.h_scroll_drag = Some(HScrollDrag { start_mouse_x, start_scroll_x: self.scroll_x });
+    }
+
+    /// Converts a thumb drag's on-screen pixel delta into a `scroll_x`
+    /// delta by the track/content ratio — the thumb only ever travels
+    /// `track_free` px while the content scrolls the much larger
+    /// `max_scroll` px, so a 1:1 pixel mapping would undershoot badly on
+    /// a long pattern.
+    fn update_h_scroll_drag(&mut self, mouse_x: f32, cx: &mut Context<Self>) {
+        let Some(drag) = self.h_scroll_drag else { return };
+        let viewport_w = f32::from(self.grid_size.get().width);
+        let content_w = self.content_width();
+        let max_scroll = (content_w - viewport_w).max(0.0);
+        let thumb_w = h_scrollbar_thumb_width(viewport_w, content_w);
+        let track_free = (viewport_w - thumb_w).max(1.0);
+        let dx = mouse_x - drag.start_mouse_x;
+        self.scroll_x = (drag.start_scroll_x + dx * (max_scroll / track_free)).clamp(0.0, max_scroll);
+        cx.notify();
+    }
+
+    fn end_h_scroll_drag(&mut self) {
+        self.h_scroll_drag = None;
+    }
+
+    /// Clicking the scrollbar track (not the thumb itself — the thumb's
+    /// own mousedown handler stops propagation before this ever fires)
+    /// jumps so the thumb's center lands under the cursor.
+    fn jump_h_scroll(&mut self, mouse_x: f32, cx: &mut Context<Self>) {
+        let viewport_w = f32::from(self.grid_size.get().width);
+        let content_w = self.content_width();
+        let max_scroll = (content_w - viewport_w).max(0.0);
+        let thumb_w = h_scrollbar_thumb_width(viewport_w, content_w);
+        let track_free = (viewport_w - thumb_w).max(1.0);
+        let target_thumb_x = (mouse_x - thumb_w / 2.0).clamp(0.0, track_free);
+        self.scroll_x = (target_thumb_x / track_free * max_scroll).clamp(0.0, max_scroll);
+        self.clamp_scroll(self.grid_size.get());
+        cx.notify();
+    }
+
+    /// A thin draggable horizontal scrollbar for the grid, below it —
+    /// the grid's own content is painted procedurally in a `canvas`
+    /// (`paint_grid`), not laid out as real wide DOM content GPUI could
+    /// track with its own `Scrollbar`/`ScrollHandle` machinery (the
+    /// `ChannelRack`'s own visible scrollbar, `render`'s own doc comment,
+    /// relies on exactly that machinery, which isn't available here), so
+    /// this one computes its own thumb size/position from `scroll_x`/
+    /// `content_width()`/the grid's own tracked viewport width instead.
+    /// Hidden (collapses to the bare track strip) once the content
+    /// already fits, same as a native scrollbar would.
+    fn render_h_scrollbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        const TRACK_H: f32 = 10.0;
+        let viewport_w = f32::from(self.grid_size.get().width);
+        let content_w = self.content_width();
+
+        let track = div().id("pr-hscroll-track").relative().h(px(TRACK_H)).w_full().flex_shrink_0().bg(theme::HEADER_BG);
+        if content_w <= viewport_w || viewport_w <= 0.0 {
+            return track;
+        }
+
+        let thumb_w = h_scrollbar_thumb_width(viewport_w, content_w);
+        let max_scroll = content_w - viewport_w;
+        let track_free = (viewport_w - thumb_w).max(0.0);
+        let thumb_x = if max_scroll > 0.0 { (self.scroll_x / max_scroll) * track_free } else { 0.0 };
+
+        track
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.jump_h_scroll(f32::from(ev.position.x), cx)),
+            )
+            .child(
+                div()
+                    .id("pr-hscroll-thumb")
+                    .absolute()
+                    .left(px(thumb_x))
+                    .top_0()
+                    .w(px(thumb_w))
+                    .h(px(TRACK_H))
+                    .rounded(theme::RADIUS_XS)
+                    .bg(theme::BTN_BORDER)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::accent_dim()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                            this.begin_h_scroll_drag(f32::from(ev.position.x));
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
+    }
+
     /// Writes `value` to every selected note's `param`, or to
     /// `self.defaults` (what the *next* placed note gets) with nothing
     /// selected — every properties-panel dial drives this, same split as
@@ -1324,9 +1438,18 @@ impl Render for PianoRoll {
                 if this.param_drag.is_some() {
                     this.update_param_drag(f32::from(ev.position.y), cx);
                 }
+                if this.h_scroll_drag.is_some() {
+                    this.update_h_scroll_drag(f32::from(ev.position.x), cx);
+                }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_param_drag()))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_param_drag()))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| {
+                this.end_param_drag();
+                this.end_h_scroll_drag();
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| {
+                this.end_param_drag();
+                this.end_h_scroll_drag();
+            }))
             .child(self.render_toolbar(cx))
             .child(self.render_channel_picker(cx))
             .child(
@@ -1342,16 +1465,25 @@ impl Render for PianoRoll {
                         div()
                             .flex_1()
                             .h_full()
+                            .flex()
+                            .flex_col()
                             .overflow_hidden()
-                            .bg(theme::PIANO_GRID_BG)
-                            .on_scroll(cx.listener(|this, ev: &ScrollEvent, _window, cx| {
-                                let delta = ev.delta.pixel_delta(px(KEY_H));
-                                this.scroll_x -= f32::from(delta.x);
-                                this.scroll_y -= f32::from(delta.y);
-                                this.clamp_scroll(this.grid_size.get());
-                                cx.notify();
-                            }))
-                            .child(grid_area),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .w_full()
+                                    .overflow_hidden()
+                                    .bg(theme::PIANO_GRID_BG)
+                                    .on_scroll(cx.listener(|this, ev: &ScrollEvent, _window, cx| {
+                                        let delta = ev.delta.pixel_delta(px(KEY_H));
+                                        this.scroll_x -= f32::from(delta.x);
+                                        this.scroll_y -= f32::from(delta.y);
+                                        this.clamp_scroll(this.grid_size.get());
+                                        cx.notify();
+                                    }))
+                                    .child(grid_area),
+                            )
+                            .child(self.render_h_scrollbar(cx)),
                     ),
             )
     }
