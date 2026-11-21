@@ -119,6 +119,12 @@ pub struct AppShell {
     /// — nothing else claims focus until a user action does (e.g. editing
     /// the BPM field), so this is where key dispatch starts at launch.
     focus_handle: FocusHandle,
+    /// Physical key (`Keystroke.key`) -> pitch it started, for the
+    /// toolbar's "Typing keyboard to piano" toggle (`toolbar::
+    /// AppShell::on_qwerty_key_down`/`_up`) — so a key released after an
+    /// octave shift still releases the note it actually started, exactly
+    /// Allodium-tauri's `qwertyKeyboard.svelte.ts`'s own `#down` map.
+    pub(crate) qwerty_down: std::collections::HashMap<String, i32>,
 }
 
 /// Dragging the BPM pill vertically nudges tempo by whole BPM per pixel of
@@ -154,6 +160,16 @@ impl AppShell {
         .detach();
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
+        // Focus moving elsewhere (the tempo field, a rename box, …) means
+        // no key-up for whatever the typing keyboard was holding will
+        // ever reach `on_qwerty_key_up` — release it all rather than let
+        // a note ring forever, matching Allodium-tauri's own
+        // `QwertyPiano.svelte` `onblur="qwertyKeyboard.releaseAll()"`.
+        cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.qwerty_down.clear();
+            this.channel_rack.update(cx, |cr, cx| cr.release_all_live_notes(cx));
+        })
+        .detach();
         Self {
             frame_stats: FrameStats::new(),
             channel_rack,
@@ -171,6 +187,7 @@ impl AppShell {
             preferences,
             tempo_input,
             focus_handle,
+            qwerty_down: std::collections::HashMap::new(),
         }
     }
 
@@ -522,6 +539,8 @@ impl Render for AppShell {
                 this.toolbar.modifiers = ev.modifiers;
                 cx.notify();
             }))
+            .on_key_down(cx.listener(Self::on_qwerty_key_down))
+            .on_key_up(cx.listener(Self::on_qwerty_key_up))
             // Drag tracking for both click-drag gestures (floating panels,
             // the BPM pill) rides GPUI's own drag-and-drop machinery
             // (`on_drag` on the originating element in `floating_panel.rs`/

@@ -30,10 +30,9 @@
 //! (the step row's length instead tracks the selected pattern's own
 //! `length_beats` live, and grows itself by one bar once a step in its
 //! current last bar is used — see `ChannelRack::ensure_spare_bar`), the
-//! mini note-roll row preview for note-based channels, the horizontal
-//! scrollbar,
-//! and the plugin/MIDI-out sections of the row context menu (no plugin
-//! system in this rewrite). Several header toggles (loop start, loop
+//! mini note-roll row preview for note-based channels, and the plugin/
+//! MIDI-out sections of the row context menu (no plugin system in this
+//! rewrite). Several header toggles (loop start, loop
 //! mode, graph editor, piano-roll overview, the options dropdown, the
 //! filter dropdown) are carried over as the same **cosmetic, no-op**
 //! controls they already are in the original — confirmed against its own
@@ -126,6 +125,12 @@ pub struct ChannelRack {
     /// playhead happens to linger on that step.
     last_step_index: i64,
     last_step_change: std::time::Instant,
+    /// Pitches currently held by a live note source (today: the
+    /// toolbar's QWERTY "typing keyboard to piano" toggle, see
+    /// `AppShell::on_qwerty_key_down`/`_up` in `toolbar.rs`) — read by
+    /// the Piano Roll's `piano_keys` to glow the matching key rows,
+    /// Allodium-tauri's `liveNotes.held` equivalent.
+    held_pitches: HashSet<i32>,
 }
 
 impl ChannelRack {
@@ -183,6 +188,7 @@ impl ChannelRack {
             pre_solo_state: None,
             last_step_index: -1,
             last_step_change: std::time::Instant::now(),
+            held_pitches: HashSet::new(),
         };
         rack.push_snapshot();
         rack
@@ -226,6 +232,44 @@ impl ChannelRack {
         let Some(ch) = self.project.channels.items.iter().find(|c| c.id == channel_id) else { return };
         let Some(sample) = self.samples.get(&ch.sample_path) else { return };
         self.engine.preview(sample.clone(), ch.volume as f32, ch.pan as f32);
+    }
+
+    /// The Piano Roll's keyboard-glow source — see `held_pitches`' own
+    /// doc comment.
+    pub fn held_pitches(&self) -> &HashSet<i32> {
+        &self.held_pitches
+    }
+
+    /// QWERTY keyboard-to-piano key-down, routed here (rather than
+    /// straight from `AppShell` to `AudioEngine`) because it needs the
+    /// selected channel's sample/volume/pan the same way `audition`
+    /// already does, plus `held_pitches` for the on-screen glow. A
+    /// no-op if there's no selected channel or its sample hasn't
+    /// loaded — matches `audition`'s own silent-fail shape.
+    pub fn live_note_on(&mut self, channel_id: u32, pitch: i32, cx: &mut Context<Self>) {
+        let Some(ch) = self.project.channels.items.iter().find(|c| c.id == channel_id) else { return };
+        let Some(sample) = self.samples.get(&ch.sample_path) else { return };
+        self.engine.note_on(pitch, sample.clone(), ch.volume as f32, ch.pan as f32);
+        self.held_pitches.insert(pitch);
+        cx.notify();
+    }
+
+    pub fn live_note_off(&mut self, pitch: i32, cx: &mut Context<Self>) {
+        self.engine.note_off(pitch);
+        self.held_pitches.remove(&pitch);
+        cx.notify();
+    }
+
+    /// Releases every currently-held live note at once — the QWERTY
+    /// toggle switching off, or the window losing focus (matching
+    /// Allodium-tauri's own `qwertyKeyboard.releaseAll()` on blur), so a
+    /// note doesn't ring forever because its key-up never reached us.
+    pub fn release_all_live_notes(&mut self, cx: &mut Context<Self>) {
+        let pitches: Vec<i32> = self.held_pitches.drain().collect();
+        for pitch in pitches {
+            self.engine.note_off(pitch);
+        }
+        cx.notify();
     }
 
     /// "+ Channel" creates an empty channel outright — no sample picker —
@@ -391,7 +435,17 @@ impl Render for ChannelRack {
 
         let header = self.render_header(cx);
 
-        let mut rows = div().size_full().flex().flex_col();
+        // `flex_1` (not `size_full`) so this shrinks to whatever room the
+        // header/footer leave rather than growing to its own content
+        // height — `overflow_scrollbar()` below needs that shrink to
+        // detect overflow and actually scroll instead of just pushing the
+        // footer out of the panel. Matches gpui-component's own tested
+        // scrollable-flex-item recipe (no intermediate wrapper div).
+        // `min_h_0()` on top of that: a flex item's automatic minimum size
+        // otherwise still floors it at its content height (every row's
+        // real height summed), so it never actually shrinks below that —
+        // no overflow is ever detected and nothing scrolls.
+        let mut rows = div().flex_1().min_h_0().flex().flex_col();
         for (idx, id) in channel_ids.iter().copied().enumerate() {
             rows = rows.child(self.render_row(idx, id, playing, current_step, fired_fade, pattern_id, name_col_width, &rack, cx));
         }
@@ -411,10 +465,16 @@ impl Render for ChannelRack {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
             .child(header)
-            // Horizontal scroll too, not just vertical: patterns can now
-            // grow past one bar's worth of steps (`ensure_spare_bar`), so a
-            // row's own step grid can be wider than the panel.
-            .child(div().flex_1().overflow_hidden().child(rows.overflow_scrollbar()))
+            // Vertical-only: `ScrollbarAxis::Both` was silently failing to
+            // ever detect vertical overflow here (only the horizontal axis
+            // worked), for reasons that didn't resolve even after matching
+            // gpui-component's own tested shrink-to-fit recipe — so this
+            // drops down to the single-axis variant every other scrollable
+            // in this codebase (e.g. `mixer.rs`'s `overflow_x_scrollbar`)
+            // already uses reliably. Each row's own step grid gets its own
+            // horizontal scrollbar instead (`row.rs`'s `render_row`), since
+            // a long pattern can still be wider than the panel.
+            .child(rows.overflow_y_scrollbar())
             .child(footer)
     }
 }

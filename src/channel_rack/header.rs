@@ -54,6 +54,7 @@ impl ChannelRack {
             .h(px(32.0))
             .w_full()
             .flex()
+            .flex_shrink_0()
             .items_center()
             .px_2()
             .gap_2()

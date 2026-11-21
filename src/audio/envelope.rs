@@ -21,6 +21,12 @@ pub enum Envelope {
     /// actually stop when its length says to, instead of ringing to the
     /// sample's full recorded duration.
     Shaped { decay_frames: u64, sustain_frames: u64, release_frames: u64, declick_frames: u64 },
+    /// A live-held note (QWERTY "typing keyboard to piano" / future MIDI
+    /// input): decays to sustain and then holds there indefinitely —
+    /// `release_at` starts `None` and stays that way until `release` is
+    /// called (key-up), at which point it ramps to silence over
+    /// `RELEASE_SECS` from whatever level it was at.
+    Sustained { declick_frames: u64, decay_frames: u64, release_frames: u64, release_at: Option<u64> },
 }
 
 fn declick_frames(sample_rate: u32) -> u64 {
@@ -51,7 +57,39 @@ impl Envelope {
         }
     }
 
-    /// `None` once the voice should be cut (only `Shaped` ever returns it).
+    pub fn sustained(sample_rate: u32) -> Self {
+        Envelope::Sustained {
+            declick_frames: declick_frames(sample_rate),
+            decay_frames: (DECAY_SECS * sample_rate as f32) as u64,
+            release_frames: (RELEASE_SECS * sample_rate as f32) as u64,
+            release_at: None,
+        }
+    }
+
+    /// Starts the release stage of a `Sustained` envelope at `frame`
+    /// (idempotent — a second call once already releasing is a no-op, so
+    /// a stray duplicate key-up can't restart the fade). No-op on any
+    /// other variant.
+    pub fn release(&mut self, frame: u64) {
+        if let Envelope::Sustained { release_at, .. } = self {
+            if release_at.is_none() {
+                *release_at = Some(frame);
+            }
+        }
+    }
+
+    fn decay_shape(frame: u64, decay_frames: u64) -> f32 {
+        if frame < decay_frames {
+            let t = frame as f32 / decay_frames.max(1) as f32;
+            1.0 - t * (1.0 - SUSTAIN_LEVEL)
+        } else {
+            SUSTAIN_LEVEL
+        }
+    }
+
+    /// `None` once the voice should be cut (`Shaped` once its release
+    /// ends; `Sustained` once *its* release — started by `release` —
+    /// ends; `Ring` never does).
     pub fn gain_at(&self, frame: u64) -> Option<f32> {
         match *self {
             Envelope::Ring { declick_frames } => Some(declick(frame, declick_frames)),
@@ -67,6 +105,22 @@ impl Envelope {
                     SUSTAIN_LEVEL * (1.0 - t)
                 } else {
                     return None;
+                };
+                Some(declick(frame, declick_frames) * shape)
+            }
+            Envelope::Sustained { decay_frames, release_frames, declick_frames, release_at } => {
+                let shape = match release_at {
+                    None => Self::decay_shape(frame, decay_frames),
+                    Some(r) if frame < r => Self::decay_shape(frame, decay_frames),
+                    Some(r) => {
+                        let level_at_release = Self::decay_shape(r, decay_frames);
+                        let into_release = frame - r;
+                        if into_release >= release_frames {
+                            return None;
+                        }
+                        let t = into_release as f32 / release_frames.max(1) as f32;
+                        level_at_release * (1.0 - t)
+                    }
                 };
                 Some(declick(frame, declick_frames) * shape)
             }
@@ -103,5 +157,30 @@ mod tests {
         assert!(env.gain_at(0).is_some());
         assert!(env.gain_at(9).is_some());
         assert!(env.gain_at(10).is_none());
+    }
+
+    #[test]
+    fn sustained_envelope_holds_until_released() {
+        let env = Envelope::sustained(48000);
+        assert!(env.gain_at(0).is_some());
+        assert!(env.gain_at(1_000_000).is_some()); // still held, way past decay
+    }
+
+    #[test]
+    fn sustained_envelope_cuts_off_after_release() {
+        let mut env = Envelope::sustained(48000);
+        env.release(1000);
+        assert!(env.gain_at(999).is_some()); // not released yet at this frame
+        assert!(env.gain_at(1000).is_some()); // release just started
+        assert!(env.gain_at(1000 + (RELEASE_SECS * 48000.0) as u64).is_none());
+    }
+
+    #[test]
+    fn a_second_release_call_does_not_restart_the_fade() {
+        let mut env = Envelope::sustained(48000);
+        env.release(1000);
+        env.release(5000); // should be ignored — already releasing from 1000
+        let cutoff = 1000 + (RELEASE_SECS * 48000.0) as u64;
+        assert!(env.gain_at(cutoff).is_none());
     }
 }

@@ -268,6 +268,11 @@ struct Voice {
     /// removed mid-note just falls back to Master instead of panicking
     /// on a stale index.
     bus: u32,
+    /// `Some(pitch)` for a QWERTY-"typing keyboard to piano" (or future
+    /// MIDI) live-held note — how `EngineMessage::LiveNoteOff` finds the
+    /// voice to release. `None` for every other kind of voice (step/
+    /// piano-roll-scheduled, preview, metronome click).
+    live_pitch: Option<i32>,
 }
 
 impl Voice {
@@ -281,7 +286,29 @@ impl Voice {
         bus: u32,
     ) -> Self {
         let rate_correction = sample.sample_rate as f64 / out_sample_rate as f64;
-        Voice { sample, pos: 0.0, playback_rate: pitch_rate * rate_correction, volume, pan, envelope, frames_played: 0, bus }
+        Voice { sample, pos: 0.0, playback_rate: pitch_rate * rate_correction, volume, pan, envelope, frames_played: 0, bus, live_pitch: None }
+    }
+
+    /// A live-held note (QWERTY keyboard-to-piano key-down): sustains at
+    /// `Envelope::sustained` until `EngineMessage::LiveNoteOff` calls
+    /// `release` on it, rather than cutting off at a fixed duration.
+    /// Always routed to Master (`bus: 0`) — same simplification `preview`
+    /// already makes, since there's no per-channel routing concept to
+    /// thread through this message yet.
+    fn new_live(sample: Arc<SampleBuffer>, pitch: i32, volume: f32, pan: f32, out_sample_rate: u32) -> Self {
+        let rate_correction = sample.sample_rate as f64 / out_sample_rate as f64;
+        let playback_rate = pitch_to_playback_rate(pitch) * rate_correction;
+        Voice {
+            sample,
+            pos: 0.0,
+            playback_rate,
+            volume,
+            pan,
+            envelope: Envelope::sustained(out_sample_rate),
+            frames_played: 0,
+            bus: 0,
+            live_pitch: Some(pitch),
+        }
     }
 
     /// Renders one output frame into `mix_l`/`mix_r`, advances position,
@@ -636,6 +663,16 @@ enum EngineMessage {
     /// A one-shot outside the scheduler, for click-to-audition. Plays
     /// regardless of transport state.
     Preview { sample: Arc<SampleBuffer>, volume: f32, pan: f32 },
+    /// A live-held note (QWERTY "typing keyboard to piano" key-down):
+    /// starts a `Voice::new_live` that sustains until the matching
+    /// `LiveNoteOff` arrives. Also releases any existing voice already
+    /// holding `pitch` first — only a defensive retrigger guard (the UI
+    /// side already ignores a key that's already down), not a path this
+    /// is expected to normally hit.
+    LiveNoteOn { pitch: i32, sample: Arc<SampleBuffer>, volume: f32, pan: f32 },
+    /// Key-up for a note started by `LiveNoteOn` — starts that voice's
+    /// release stage rather than cutting it instantly.
+    LiveNoteOff { pitch: i32 },
     /// Replaces the Playlist's song-mode schedule. Pushed on every project
     /// edit alongside `UpdateContent` (patterns, placements, channel
     /// content can all affect it), same reasoning as that variant.
@@ -850,6 +887,21 @@ impl AudioEngine {
                             }
                             EngineMessage::Preview { sample, volume, pan } => {
                                 voices.push(Voice::new(sample, 1.0, volume, pan, Envelope::ring(out_sample_rate), out_sample_rate, 0));
+                            }
+                            EngineMessage::LiveNoteOn { pitch, sample, volume, pan } => {
+                                for v in voices.iter_mut() {
+                                    if v.live_pitch == Some(pitch) {
+                                        v.envelope.release(v.frames_played);
+                                    }
+                                }
+                                voices.push(Voice::new_live(sample, pitch, volume, pan, out_sample_rate));
+                            }
+                            EngineMessage::LiveNoteOff { pitch } => {
+                                for v in voices.iter_mut() {
+                                    if v.live_pitch == Some(pitch) {
+                                        v.envelope.release(v.frames_played);
+                                    }
+                                }
                             }
                             EngineMessage::UpdateSongContent { placements, clips, song_length_steps: new_len } => {
                                 song_placements = placements;
@@ -1171,6 +1223,18 @@ impl AudioEngine {
     /// regardless of whether the transport is running.
     pub fn preview(&self, sample: Arc<SampleBuffer>, volume: f32, pan: f32) {
         let _ = self.sender.send(EngineMessage::Preview { sample, volume, pan });
+    }
+
+    /// QWERTY "typing keyboard to piano" (or future MIDI) key-down:
+    /// starts a note at `pitch` that sustains until `note_off` with the
+    /// same `pitch` arrives.
+    pub fn note_on(&self, pitch: i32, sample: Arc<SampleBuffer>, volume: f32, pan: f32) {
+        let _ = self.sender.send(EngineMessage::LiveNoteOn { pitch, sample, volume, pan });
+    }
+
+    /// Key-up for a note started by `note_on`.
+    pub fn note_off(&self, pitch: i32) {
+        let _ = self.sender.send(EngineMessage::LiveNoteOff { pitch });
     }
 
     /// Pushes a fresh song-mode schedule — call on every edit that could

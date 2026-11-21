@@ -4,6 +4,7 @@
 
 use gpui::component::input::Input;
 use gpui::component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui::component::scroll::ScrollableElement;
 use gpui::{App, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, ParentElement, ScrollEvent, Styled, Window, div, prelude::*, px};
 
 use crate::color_utils::{contrast_text_color, hsl_to_rgb_u32};
@@ -402,6 +403,7 @@ impl ChannelRack {
         div()
             .flex()
             .flex_row()
+            .flex_shrink_0()
             .items_center()
             .gap_2()
             .px_2()
@@ -511,6 +513,13 @@ impl ChannelRack {
                         .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| this.select_row(idx, id, ev.modifiers(), cx)))
                 },
             )
-            .child(step_row)
+            // `flex_1`/`min_w_0` so the step grid (not the whole row) is
+            // what shrinks and scrolls when a pattern grows past one bar —
+            // the name/dial columns before it keep their own fixed width.
+            // Explicit `.id()`: every row calls this from the same source
+            // line, so the scrollable's own call-site-derived id would
+            // otherwise collide across rows and they'd all share one
+            // scroll position.
+            .child(step_row.flex_1().min_w_0().overflow_x_scrollbar().id(("steps-scroll", id as usize)))
     }
 }

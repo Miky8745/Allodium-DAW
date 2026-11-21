@@ -539,7 +539,7 @@ impl Render for PianoRoll {
                     .w_full()
                     .flex()
                     .overflow_hidden()
-                    .child(piano_keys(self.scroll_y))
+                    .child(piano_keys(self.scroll_y, self.channel_rack.read(cx).held_pitches()))
                     .child(
                         div()
                             .flex_1()
@@ -576,7 +576,7 @@ impl Render for PianoRoll {
 /// half the same grey as the C row below it) instead of a flat fill.
 /// Ported from the same illusion in `PianoKeys.svelte`
 /// (`.key-row--csharp`'s `linear-gradient(..., 50%, 50%)`), not re-derived.
-fn piano_keys(scroll_y: f32) -> impl IntoElement {
+fn piano_keys(scroll_y: f32, held: &std::collections::HashSet<i32>) -> impl IntoElement {
     let rows = (0..PITCH_COUNT).map(|row| {
         let pitch = 127 - row;
         let is_black = is_black_key(pitch);
@@ -587,21 +587,25 @@ fn piano_keys(scroll_y: f32) -> impl IntoElement {
         // `noBorder = isBlackKey(p) || isBlackKey(belowP)`: only true
         // white-to-white boundaries (E/F, B/C) keep a border line.
         let no_border = is_black || is_black_key(pitch - 1);
+        // Live-note glow (QWERTY "typing keyboard to piano", see
+        // `toolbar::AppShell::on_qwerty_key_down`) — `PianoKeys.svelte`'s
+        // `highlighted`/`csharpBelowCHighlighted`, minus the velocity-
+        // scaled MIDI glow (no MIDI I/O here, just on/off).
+        let highlighted = !is_black && held.contains(&pitch);
+        let csharp_below_c_highlighted = is_csharp && held.contains(&(pitch - 1));
 
         let key = div().relative().w_full().h(px(KEY_H)).flex_shrink_0();
         let key = if is_csharp {
-            key.bg(linear_gradient(
-                180.0,
-                linear_color_stop(theme::PIANO_KEY_WHITE, 0.5),
-                linear_color_stop(theme::PIANO_KEY_C, 0.5),
-            ))
+            let bottom = if csharp_below_c_highlighted { theme::warm_accent() } else { theme::PIANO_KEY_C };
+            key.bg(linear_gradient(180.0, linear_color_stop(theme::PIANO_KEY_WHITE, 0.5), linear_color_stop(bottom, 0.5)))
         } else {
-            let row_bg = if is_c { theme::PIANO_KEY_C } else { theme::PIANO_KEY_WHITE };
+            let row_bg = if highlighted { theme::warm_accent() } else if is_c { theme::PIANO_KEY_C } else { theme::PIANO_KEY_WHITE };
             key.bg(row_bg)
         };
 
         key.when(!no_border, |d| d.border_b_1().border_color(theme::PIANO_GRID_BG.alpha(0.4)))
             .when(is_black, |d| {
+                let black_bg = if held.contains(&pitch) { theme::warm_accent() } else { theme::PIANO_KEY_BLACK };
                 d.child(
                     div()
                         .absolute()
@@ -609,7 +613,7 @@ fn piano_keys(scroll_y: f32) -> impl IntoElement {
                         .top(px(2.0))
                         .bottom(px(2.0))
                         .w(px(KEY_COL_W * 0.62))
-                        .bg(theme::PIANO_KEY_BLACK)
+                        .bg(black_bg)
                         .rounded_r(theme::RADIUS_XS),
                 )
             })

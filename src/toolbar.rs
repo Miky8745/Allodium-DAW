@@ -100,6 +100,11 @@ pub struct ToolbarState {
     paused: bool,
     recording: bool,
     typing_keyboard: bool,
+    /// Semitone-octave shift applied to `AppShell::on_qwerty_key_down`'s
+    /// pitch mapping — `,`/`.` while typing_keyboard is on, matching
+    /// Allodium-tauri's `qwertyKeyboard.svelte.ts` `octave` field
+    /// exactly, including its `-5..=4` clamp.
+    typing_keyboard_octave: i32,
     precount: bool,
     loop_record: bool,
     metronome: bool,
@@ -181,6 +186,7 @@ impl Default for ToolbarState {
             paused: false,
             recording: false,
             typing_keyboard: false,
+            typing_keyboard_octave: 0,
             precount: false,
             loop_record: false,
             metronome: false,
@@ -518,6 +524,60 @@ impl AppShell {
     pub(crate) fn on_toggle_playback(&mut self, _: &TogglePlayback, _window: &mut Window, cx: &mut Context<Self>) {
         self.channel_rack.update(cx, |cr, cx| cr.toggle_play(cx));
         cx.notify();
+    }
+
+    /// QWERTY "typing keyboard to piano" key-down — ported from
+    /// Allodium-tauri's `qwertyKeyboard.svelte.ts`/`QwertyPiano.svelte`.
+    /// Tracker-style layout, two rows per octave, keyed by the
+    /// *character* each key types rather than its physical code (this
+    /// rewrite has no code-level keyboard API; GPUI's `Keystroke` only
+    /// exposes the resolved key character) — a deliberate simplification
+    /// from the original's layout-independent `KeyboardEvent.code`
+    /// scheme, acceptable since the labels printed on an ordinary QWERTY
+    /// board are exactly the characters matched here anyway:
+    ///   lower octave: z s x d c v g b h n j m   (white row z..m, black s d g h j)
+    ///   upper octave: q 2 w 3 e r 5 t 6 y 7 u i (white row q..i, black 2 3 5 6 7)
+    /// `,`/`.` shift the octave down/up, same `-5..=4` clamp as the
+    /// original. Guards (modifier held, a text field focused, the
+    /// preferences dialog open) mirror `QwertyPiano.svelte`'s own
+    /// `onKeydown` exactly, so Ctrl+Z/C/V and ordinary typing still work
+    /// while the toggle is on.
+    pub(crate) fn on_qwerty_key_down(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.toolbar.typing_keyboard {
+            return;
+        }
+        let m = &event.keystroke.modifiers;
+        if m.control || m.alt || m.platform || window.has_focused_input(cx) {
+            return;
+        }
+        let key = event.keystroke.key.as_str();
+        if key == "," || key == "." {
+            if !event.is_held {
+                self.toolbar.typing_keyboard_octave = (self.toolbar.typing_keyboard_octave + if key == "," { -1 } else { 1 }).clamp(-5, 4);
+                cx.notify();
+            }
+            return;
+        }
+        const KEY_OFFSETS: &[(&str, i32)] = &[
+            ("z", 0), ("s", 1), ("x", 2), ("d", 3), ("c", 4), ("v", 5), ("g", 6), ("b", 7), ("h", 8), ("n", 9), ("j", 10), ("m", 11),
+            ("q", 12), ("2", 13), ("w", 14), ("3", 15), ("e", 16), ("r", 17), ("5", 18), ("t", 19), ("6", 20), ("y", 21), ("7", 22), ("u", 23), ("i", 24),
+        ];
+        let Some(&(_, offset)) = KEY_OFFSETS.iter().find(|(k, _)| *k == key) else { return };
+        if event.is_held || self.qwerty_down.contains_key(key) {
+            return;
+        }
+        const BASE_PITCH: i32 = 60; // C5, this engine's unshifted reference (see audio::pitch)
+        let pitch = (BASE_PITCH + self.toolbar.typing_keyboard_octave * 12 + offset).clamp(0, 127);
+        let Some(channel_id) = self.channel_rack.read(cx).selected_channel_id() else { return };
+        self.qwerty_down.insert(key.to_string(), pitch);
+        self.channel_rack.update(cx, |cr, cx| cr.live_note_on(channel_id, pitch, cx));
+    }
+
+    pub(crate) fn on_qwerty_key_up(&mut self, event: &gpui::KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        if let Some(pitch) = self.qwerty_down.remove(key) {
+            self.channel_rack.update(cx, |cr, cx| cr.live_note_off(pitch, cx));
+        }
     }
 
     fn toggle_pause(&mut self, cx: &mut Context<Self>) {
@@ -913,10 +973,22 @@ impl AppShell {
                                 IconName::Keyboard,
                                 self.toolbar.typing_keyboard,
                                 theme::secondary(),
-                                "Typing keyboard to piano",
-                                if self.toolbar.typing_keyboard { "On" } else { "Off" },
+                                "Typing keyboard to piano (Z/Q rows, , . = octave)",
+                                if self.toolbar.typing_keyboard {
+                                    format!(
+                                        "On · octave {}{}",
+                                        if self.toolbar.typing_keyboard_octave >= 0 { "+" } else { "" },
+                                        self.toolbar.typing_keyboard_octave
+                                    )
+                                } else {
+                                    "Off".to_string()
+                                },
                                 |this, _, _, cx| {
                                     this.toolbar.typing_keyboard = !this.toolbar.typing_keyboard;
+                                    if !this.toolbar.typing_keyboard {
+                                        this.qwerty_down.clear();
+                                        this.channel_rack.update(cx, |cr, cx| cr.release_all_live_notes(cx));
+                                    }
                                     cx.notify();
                                 },
                                 cx,
