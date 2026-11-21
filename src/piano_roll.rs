@@ -390,7 +390,8 @@ impl PianoRoll {
             .read(cx)
             .channels()
             .iter()
-            .map(|c| (c.id, if c.name.is_empty() { "Drop sample".to_string() } else { c.name.clone() }))
+            .filter(|c| !c.sample_path.is_empty())
+            .map(|c| (c.id, c.name.clone()))
             .collect();
         let current_label =
             channels.iter().find(|(id, _)| Some(*id) == current).map(|(_, l)| l.clone()).unwrap_or_else(|| "No channel".to_string());

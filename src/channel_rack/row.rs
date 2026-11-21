@@ -5,7 +5,10 @@
 use gpui::component::input::Input;
 use gpui::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui::component::InteractiveElementExt as _;
-use gpui::{App, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, ParentElement, ScrollEvent, Styled, Window, div, prelude::*, px};
+use gpui::{
+    App, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels,
+    Point, Render, ScrollEvent, Styled, Window, div, prelude::*, px,
+};
 
 use crate::color_utils::{contrast_text_color, hsl_to_rgb_u32};
 use crate::file_browser::SampleDragPayload;
@@ -30,6 +33,32 @@ fn next_note_id(notes: &[Note]) -> u32 {
 /// start at the same step; see `set_step`'s doc comment.
 fn step_note_index(notes: &[Note], step: usize) -> Option<usize> {
     notes.iter().position(|n| n.pitch == STEP_PITCH && n.length == 1.0 && n.start as usize == step)
+}
+
+/// Carried by `on_drag`/`on_drop` on a row's select square (`row.rs`'s
+/// `render_row`) to reorder channels by dragging one square onto another
+/// — deliberately its own payload type, distinct from `SampleDragPayload`,
+/// so a sample dragged in from the File Browser can never be mistaken for
+/// a channel being reordered (and vice versa) by the `drag_over`/`on_drop`
+/// type matching.
+#[derive(Clone)]
+struct ChannelDragPayload {
+    channel_id: u32,
+}
+
+/// The floating ghost shown under the cursor while dragging a select
+/// square to reorder channels — GPUI's drag API requires a real view, not
+/// just a style, to render this (same reason `SampleDragPreview` exists).
+struct ChannelDragPreview;
+
+impl Render for ChannelDragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(14.0)).h(px(14.0)).rounded(theme::RADIUS_XS).border_1().border_color(theme::accent()).bg(theme::accent().alpha(0.5))
+    }
+}
+
+fn channel_drag_preview(_payload: &ChannelDragPayload, _offset: Point<Pixels>, _window: &mut Window, cx: &mut App) -> Entity<ChannelDragPreview> {
+    cx.new(|_| ChannelDragPreview)
 }
 
 /// Blends two colors channel-by-channel, `t = 0` giving `from` and `t = 1`
@@ -173,6 +202,22 @@ impl ChannelRack {
         cx.notify();
     }
 
+    /// Dragging one row's select square onto another's reorders the
+    /// channel list — moves `dragged_id` to sit at `target_id`'s current
+    /// position, shifting everything between. A no-op if either id is
+    /// missing or they're the same channel (dropping a square on itself).
+    fn reorder_channel(&mut self, dragged_id: u32, target_id: u32, cx: &mut Context<Self>) {
+        if dragged_id == target_id {
+            return;
+        }
+        let Some(from) = self.project.channels.items.iter().position(|c| c.id == dragged_id) else { return };
+        let channel = self.project.channels.items.remove(from);
+        let to = self.project.channels.items.iter().position(|c| c.id == target_id).unwrap_or(from);
+        self.project.channels.items.insert(to, channel);
+        self.save();
+        cx.notify();
+    }
+
     fn start_rename(&mut self, channel_id: u32, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ch) = self.project.channels.items.iter().find(|c| c.id == channel_id) else { return };
         let name = ch.name.clone();
@@ -302,7 +347,17 @@ impl ChannelRack {
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::BG_PILL_HOVER))
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| this.set_step(id, i, true, cx)))
-                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, _: &MouseDownEvent, _, cx| this.set_step(id, i, false, cx))),
+                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, _: &MouseDownEvent, _, cx| this.set_step(id, i, false, cx)))
+                    // Dragging across steps with a button still held paints
+                    // them the same way clicking each one individually
+                    // would, so a left/right-drag across the row fills or
+                    // erases a run of steps in one motion instead of
+                    // requiring a separate click per step.
+                    .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| match ev.pressed_button {
+                        Some(MouseButton::Left) => this.set_step(id, i, true, cx),
+                        Some(MouseButton::Right) => this.set_step(id, i, false, cx),
+                        _ => {}
+                    })),
             );
         }
 
@@ -511,6 +566,12 @@ impl ChannelRack {
                         .bg(bg)
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| this.select_row(idx, id, ev.modifiers(), cx)))
+                        // Dragging a select square onto another row's
+                        // reorders the channel list — see
+                        // `ChannelRack::reorder_channel`.
+                        .on_drag(ChannelDragPayload { channel_id: id }, channel_drag_preview)
+                        .drag_over::<ChannelDragPayload>(|style, _, _, _| style.border_color(theme::accent()).bg(theme::accent().alpha(0.35)))
+                        .on_drop(cx.listener(move |this, payload: &ChannelDragPayload, _, cx| this.reorder_channel(payload.channel_id, id, cx)))
                 },
             )
             // The viewport (this `.flex_1().min_w_0()` div) and its content
