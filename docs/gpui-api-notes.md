@@ -145,6 +145,35 @@ the DAW's scheduler needs to do.
   arguments to `.clamp()` can never cross, rather than assuming the
   tracked size will always be "big enough."
 
+## Splitting a large view into `foo/*.rs` submodules
+
+Not GPUI-specific, but came up splitting both `channel_rack.rs` and
+`piano_roll.rs` this way, and is easy to get wrong: Rust privacy only
+flows from an ancestor module down to its descendants, never sideways
+between sibling submodules, and never back up from a child to its
+parent. Concretely, for an entity type (e.g. `PianoRoll`) split into
+`piano_roll.rs` (the struct + top-level `render()`) plus `piano_roll/
+{a,b,c}.rs` (each its own `impl PianoRoll { ... }` block):
+- A method `render()` calls directly must be `pub(super)` in whichever
+  submodule defines it — a plain private `fn` is invisible to the
+  *parent*, even though the parent is the one holding the `Entity`.
+- A type used as one of `PianoRoll`'s own struct field types (e.g. a
+  per-submodule drag-state struct) must also be `pub(super)` in its
+  defining submodule, then `use`'d (even privately) in the parent — a
+  private `use` still counts as a visible item to *that module's own
+  descendants*, so other submodules can reach it via `super::TypeName`
+  without needing their own direct import.
+- Submodule **A** can call a `pub(super)` method/type defined in
+  sibling submodule **B** by going through the shared parent
+  (`super::b::thing`) — `pub(super)` visibility extends to the parent
+  module *and all of its descendants*, which includes every sibling, not
+  just the immediate parent.
+- Small pure-math helpers used by *several* submodules (pixel/grid
+  conversions, shared constants) are simplest left directly in the
+  parent file rather than picking one submodule to own them and making
+  every other one reach across — descendants already see all of a
+  parent's private items for free, no `pub` needed in that direction.
+
 ## Performance lessons
 
 - **Never put `eprintln!`/`println!` inside a per-event input handler**

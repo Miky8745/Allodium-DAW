@@ -4,6 +4,15 @@ Status: done, at the "compiles, runs, holds 60fps" level of
 verification — same honest caveat as Stage 4: nothing requiring a mouse,
 keyboard, or ears has been confirmed yet.
 
+**Note (later pass):** by the time the toolbar/Note Properties/
+scrolling-nav follow-ups landed, `src/piano_roll.rs` had grown past this
+stage's own single-file shape — it's now split into `src/piano_roll/
+{interaction,toolbar,properties,scroll,paint}.rs`, the same way
+`channel_rack.rs` was split into `src/channel_rack/*.rs`. The file
+references below (`src/piano_roll.rs`) describe this stage's own
+original contents; see that module split (and `piano_roll.rs`'s own
+current top doc comment) for where each piece actually lives now.
+
 ## What this stage actually was: integration, not new design
 
 As the stage brief predicted, the hard part was already solved.
