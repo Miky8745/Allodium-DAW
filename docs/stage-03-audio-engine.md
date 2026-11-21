@@ -84,12 +84,49 @@ no lock either side could block the other on — the stage brief was
 explicit that the audio thread must never risk blocking on a `Mutex` the
 UI thread might be holding.
 
+## Per-note audio properties: pan offset, release, filter, pitch bend, slide
+
+Added later (`Note` gained `pan`/`release`/`mod_x`/`mod_y`/`fine_pitch`/
+`color`/`slide` — see `src/project.rs` and `piano_roll.rs`'s own top doc
+comment), at the point where the Piano Roll's Note Properties panel
+needed these to do something audible, not just store a value. All of
+this lives in `trigger_channel_step`/`Voice` (`src/audio/mod.rs`):
+
+- **Filter** (`mod_x`/`mod_y`): a per-voice RBJ lowpass biquad
+  (`BiquadLowpass`), log-mapped cutoff (50Hz–20kHz) and linear-mapped
+  Q (0.5–10). Bypassed entirely — no coefficient math, no per-sample
+  cost — at/above ~49% of Nyquist, which is where a note's default
+  `mod_x: 1.0` (20kHz) lands at every sample rate this engine actually
+  targets. Worth the pattern for any future per-voice DSP stage: make
+  the *default* value resolve to a bypass variant, so most voices never
+  pay for the feature at all.
+- **Release extending past the note's own end** (`Envelope::
+  shaped_with_release`): the tricky part was preserving `Envelope::
+  shaped`'s existing behavior (and its own passing unit tests) exactly
+  at `Note::release`'s default (`0.5`) rather than reinterpreting that
+  value — `shaped_with_release` just delegates straight to `shaped`
+  when `release_param == 0.5`, and only computes a real past-the-end
+  release tail away from that default. A reusable shape for any future
+  "give an existing fixed-behavior function a per-call override, without
+  risking a silent behavior change at the old default": special-case
+  the old default back to the old function by name, don't try to make
+  one formula cover both.
+- **Slide notes** (`Voice::begin_slide`): simpler here than in
+  Allodium-tauri. That implementation has to guard against a race from
+  async sample loading — two voices might register as a slide's target
+  in either order depending on which sample finished loading first.
+  This engine decodes every sample up front (`ChannelRack::new`/
+  `assign_sample`), so by the time any note can be scheduled at all,
+  every voice that could possibly match already exists — there's no
+  async gap for the race to live in. If a future stage ever adds
+  on-demand/streamed sample loading, re-check whether this assumption
+  still holds before trusting `begin_slide`'s current simplicity.
+
 ## What's deferred (per the stage's own list)
 
 Song-mode placement-based scheduling, per-channel independent looping,
-slide notes, multisample folders, metronome, solo-channel audition
-filtering. None of these are forgotten, just intentionally out of scope
-for this stage.
+multisample folders, metronome, solo-channel audition filtering. None of
+these are forgotten, just intentionally out of scope for this stage.
 
 ## Verification
 

@@ -33,13 +33,27 @@ fn declick_frames(sample_rate: u32) -> u64 {
     (DECLICK_SECS * sample_rate as f32) as u64
 }
 
+/// `Note::release` (`0..1`) to an actual release-stage duration in
+/// seconds: `0.5` is `RELEASE_SECS` (the old fixed default), linear down
+/// to `0` at `release_param: 0.0` and up to 2 seconds at `release_param:
+/// 1.0` — Allodium-tauri's own `releaseSeconds()`.
+fn release_seconds(release_param: f64) -> f32 {
+    const MAX_RELEASE_SECS: f32 = 2.0;
+    let r = release_param.clamp(0.0, 1.0) as f32;
+    if r <= 0.5 { (r / 0.5) * RELEASE_SECS } else { RELEASE_SECS + ((r - 0.5) / 0.5) * (MAX_RELEASE_SECS - RELEASE_SECS) }
+}
+
 impl Envelope {
     pub fn ring(sample_rate: u32) -> Self {
         Envelope::Ring { declick_frames: declick_frames(sample_rate) }
     }
 
     /// Decay/release stage lengths are clamped to fit inside very short
-    /// notes so a 1-step note doesn't produce a negative sustain.
+    /// notes so a 1-step note doesn't produce a negative sustain. Release
+    /// always fits *inside* `duration_frames` here — this is the fixed
+    /// `RELEASE_SECS` behavior from before per-note release existed;
+    /// `shaped_with_release`'s own doc comment covers how a real
+    /// `Note::release` value changes that.
     pub fn shaped(duration_frames: u64, sample_rate: u32) -> Self {
         let mut decay = (DECAY_SECS * sample_rate as f32) as u64;
         let mut release = (RELEASE_SECS * sample_rate as f32) as u64;
@@ -55,6 +69,26 @@ impl Envelope {
             release_frames: release,
             declick_frames: declick_frames(sample_rate),
         }
+    }
+
+    /// Like `shaped`, but `release_param` (`Note::release`, `0..1`) picks
+    /// how long the release tail actually is — and, unlike `shaped`'s own
+    /// fixed `RELEASE_SECS`, that tail is appended *after*
+    /// `duration_frames` rather than fit inside it, so a longer release
+    /// really does ring on past the note's own scheduled end (up to ~2s
+    /// at `release_param: 1.0`), matching Allodium-tauri's own per-note
+    /// `release`. At exactly `0.5` (the default/sentinel — "the engine's
+    /// old fixed ~50ms release") this delegates straight to `shaped`,
+    /// preserving that exact pre-existing behavior rather than
+    /// reinterpreting the same nominal value two different ways.
+    pub fn shaped_with_release(duration_frames: u64, release_param: f64, sample_rate: u32) -> Self {
+        if (release_param - 0.5).abs() < 1e-9 {
+            return Self::shaped(duration_frames, sample_rate);
+        }
+        let decay = ((DECAY_SECS * sample_rate as f32) as u64).min(duration_frames.max(1));
+        let sustain = duration_frames.saturating_sub(decay);
+        let release = ((release_seconds(release_param) * sample_rate as f32) as u64).max(1);
+        Envelope::Shaped { decay_frames: decay, sustain_frames: sustain, release_frames: release, declick_frames: declick_frames(sample_rate) }
     }
 
     pub fn sustained(sample_rate: u32) -> Self {

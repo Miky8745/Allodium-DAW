@@ -167,7 +167,7 @@ impl ChannelRack {
         match (active, existing) {
             (true, None) => {
                 let id = next_note_id(&entry.notes);
-                entry.notes.push(Note { id, pitch: STEP_PITCH, start: step as f64, length: 1.0, velocity: 1.0 });
+                entry.notes.push(Note { id, pitch: STEP_PITCH, start: step as f64, length: 1.0, velocity: 1.0, ..Default::default() });
             }
             (false, Some(idx)) => {
                 entry.notes.remove(idx);
@@ -203,7 +203,7 @@ impl ChannelRack {
         entry.notes.retain(|note| !(note.pitch == STEP_PITCH && note.length == 1.0 && (note.start as usize) < step_count));
         let mut next_id = next_note_id(&entry.notes);
         for i in (0..fill_count).step_by(n) {
-            entry.notes.push(Note { id: next_id, pitch: STEP_PITCH, start: i as f64, length: 1.0, velocity: 1.0 });
+            entry.notes.push(Note { id: next_id, pitch: STEP_PITCH, start: i as f64, length: 1.0, velocity: 1.0, ..Default::default() });
             next_id += 1;
         }
         self.sync_pattern_length(cx);

@@ -37,23 +37,46 @@
 //!   `update_marquee_selection`) with Ctrl+drag available in every tool,
 //!   group-move for a multi-note selection, and Delete/Backspace/Escape
 //!   routed in from `AppShell`'s key dispatcher (`shell.rs`'s
-//!   `route_piano_roll_key`) while this panel is open and frontmost. The
-//!   properties panel is deliberately minimal — velocity only, the one
-//!   per-note property this rewrite's `Note` actually has; see the next
-//!   bullet for what's still out.
+//!   `route_piano_roll_key`) while this panel is open and frontmost.
+//! - **Added** (same later pass, extended further at the user's explicit
+//!   request): the rest of the original's `NotePropertiesPanel` —
+//!   `Note` gained `pan`/`release`/`mod_x`/`mod_y`/`fine_pitch`/`color`/
+//!   `slide` (`src/project.rs`, all `#[serde(default)]` so older saves
+//!   keep loading), the properties panel (`render_note_properties`)
+//!   edits all of them via `NoteParam` + a color swatch picker + a slide
+//!   toggle, and notes draw in their own color in the grid
+//!   (`paint_grid`'s own note loop) with a bright rim standing in for the
+//!   original's white-rim/glow/diagonal-stripe selected-note treatment
+//!   (no stripe-drawing primitive here). The audio engine (`src/audio/
+//!   mod.rs`) actually applies all of these now, not just storing them:
+//!   `trigger_channel_step` offsets the channel's own pan by `note.pan`,
+//!   shifts playback rate by `note.fine_pitch` cents
+//!   (`cents_to_rate_multiplier`), runs a per-voice RBJ lowpass biquad
+//!   from `mod_x`/`mod_y` (`BiquadLowpass`, bypassed entirely at the
+//!   default "fully open" cutoff so the common case costs nothing extra
+//!   per sample), extends the envelope's release tail past the note's
+//!   own end for `release` values above the `0.5` default
+//!   (`Envelope::shaped_with_release`), and — a real engine change, not
+//!   just the Piano Roll — a `slide` note never starts a voice of its
+//!   own; instead it bends every still-ringing voice of the same channel
+//!   and note color to its own pitch over its own length
+//!   (`Voice::begin_slide`/`ChannelVoiceData::id`). Mixed-value display
+//!   (the original's dimmed "MIXED" label when selected notes disagree)
+//!   is skipped — the panel just shows the first selected note's value
+//!   per control.
 //! - **Declined, matching `02-feature-scope.md`'s own stretch list**:
-//!   zoom, copy/paste, note properties beyond velocity (pan, release,
-//!   modX/modY, fine pitch, color, slide), slide notes, the velocity
-//!   lane, the overview/minimap strip, and per-channel independent-loop
-//!   playhead wrapping. Also declined: pitched audio preview on
-//!   place/move (the original's `audioEngine.previewNote`). This
-//!   engine's `AudioEngine::preview` has no pitch parameter yet, and
-//!   adding one is a real engine change, not a Piano Roll one. Also
-//!   declined (simplification, not a missed spec item): the original's
-//!   "click without dragging on a note inside a multi-selection narrows
-//!   the selection to just it" and the white-rim/glow/diagonal-stripe
-//!   selected-note styling (dimming unselected notes to 40% covers the
-//!   same "a selection is active" cue without a stripe-drawing primitive).
+//!   zoom, copy/paste, the velocity lane, the overview/minimap strip,
+//!   and per-channel independent-loop playhead wrapping. Also declined:
+//!   pitched audio preview on place/move (the original's `audioEngine.
+//!   previewNote`) — unaffected by the note-properties audio work above,
+//!   since preview voices (`AudioEngine::preview`) never go through
+//!   `trigger_channel_step` at all. Also declined (simplification, not a
+//!   missed spec item): the original's "click without dragging on a
+//!   note inside a multi-selection narrows the selection to just it," and
+//!   its slide-voice-registration race (two voices racing to apply a
+//!   bend because samples load asynchronously) — this rewrite's samples
+//!   are already decoded and in memory before any note can be
+//!   scheduled, so that race can't happen here to begin with.
 //! - **Declined, not a real bug to carry forward**: the original docs
 //!   themselves flag a historical bug: `NoteData.start`/`length` used
 //!   to be `u32`, which broke saving fractional notes before they were
@@ -68,6 +91,7 @@ use std::time::Instant;
 use gpui::assets::IconName;
 use gpui::component::button::{Button, ButtonVariants};
 use gpui::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui::component::{Icon, Sizable};
 use gpui::{
     Context, Entity, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement, Pixels, Point, Render, ScrollEvent, Styled, Window, canvas, div, linear_color_stop,
@@ -198,8 +222,159 @@ struct DyingNote {
     died_at: Instant,
 }
 
+/// Every per-note dial in `render_note_properties` edits one of these —
+/// shared getter/setter/display logic instead of six near-identical
+/// dials, same reasoning `channel_rack::drag::ParamKind` already uses for
+/// Pan/Volume. Velocity aside (already an MVP field), these are all the
+/// "note properties beyond velocity" this module's own top doc comment
+/// used to list as declined.
+#[derive(Clone, Copy, PartialEq)]
+enum NoteParam {
+    Velocity,
+    /// Offset on top of the channel's own pan — `Note::pan`.
+    Pan,
+    /// `Note::release` — how far the release tail rings past the note's
+    /// own scheduled end.
+    Release,
+    /// Filter cutoff — `Note::mod_x`.
+    Cutoff,
+    /// Filter resonance/Q — `Note::mod_y`.
+    Resonance,
+    /// Fine pitch in cents ("pitch bend") — `Note::fine_pitch`.
+    FinePitch,
+}
+
+impl NoteParam {
+    const ALL: [NoteParam; 6] =
+        [NoteParam::Velocity, NoteParam::Pan, NoteParam::Release, NoteParam::Cutoff, NoteParam::Resonance, NoteParam::FinePitch];
+
+    fn name(self) -> &'static str {
+        match self {
+            NoteParam::Velocity => "Velocity",
+            NoteParam::Pan => "Pan",
+            NoteParam::Release => "Release",
+            NoteParam::Cutoff => "Cutoff",
+            NoteParam::Resonance => "Resonance",
+            NoteParam::FinePitch => "Pitch bend",
+        }
+    }
+
+    fn min(self) -> f64 {
+        if self == NoteParam::FinePitch { -1200.0 } else { 0.0 }
+    }
+
+    fn max(self) -> f64 {
+        if self == NoteParam::FinePitch { 1200.0 } else { 1.0 }
+    }
+
+    /// The value a dial resets to on double-click/"Reset" — distinct
+    /// from `min()` since several of these (pan, release, cutoff) have a
+    /// "neutral/no effect" value in the middle or at the top of their
+    /// range, not at zero.
+    fn reset_value(self) -> f64 {
+        match self {
+            NoteParam::Velocity => 1.0,
+            NoteParam::Pan => 0.5,
+            NoteParam::Release => 0.5,
+            NoteParam::Cutoff => 1.0,
+            NoteParam::Resonance => 0.0,
+            NoteParam::FinePitch => 0.0,
+        }
+    }
+
+    fn get(self, note: &Note) -> f64 {
+        match self {
+            NoteParam::Velocity => note.velocity,
+            NoteParam::Pan => note.pan,
+            NoteParam::Release => note.release,
+            NoteParam::Cutoff => note.mod_x,
+            NoteParam::Resonance => note.mod_y,
+            NoteParam::FinePitch => note.fine_pitch,
+        }
+    }
+
+    fn set(self, note: &mut Note, value: f64) {
+        match self {
+            NoteParam::Velocity => note.velocity = value,
+            NoteParam::Pan => note.pan = value,
+            NoteParam::Release => note.release = value,
+            NoteParam::Cutoff => note.mod_x = value,
+            NoteParam::Resonance => note.mod_y = value,
+            NoteParam::FinePitch => note.fine_pitch = value,
+        }
+    }
+
+    fn get_default(self, defaults: &NoteDefaults) -> f64 {
+        match self {
+            NoteParam::Velocity => defaults.velocity,
+            NoteParam::Pan => defaults.pan,
+            NoteParam::Release => defaults.release,
+            NoteParam::Cutoff => defaults.mod_x,
+            NoteParam::Resonance => defaults.mod_y,
+            NoteParam::FinePitch => defaults.fine_pitch,
+        }
+    }
+
+    fn set_default(self, defaults: &mut NoteDefaults, value: f64) {
+        match self {
+            NoteParam::Velocity => defaults.velocity = value,
+            NoteParam::Pan => defaults.pan = value,
+            NoteParam::Release => defaults.release = value,
+            NoteParam::Cutoff => defaults.mod_x = value,
+            NoteParam::Resonance => defaults.mod_y = value,
+            NoteParam::FinePitch => defaults.fine_pitch = value,
+        }
+    }
+
+    /// Mirrors the audio engine's own mapping for cutoff/release
+    /// (`audio::mod_x_to_cutoff_hz`/`audio::envelope`'s `release_seconds`)
+    /// so the dial's readout always matches what's actually audible —
+    /// duplicated rather than shared across the UI/engine boundary, same
+    /// trade `widgets::dial`'s own callers already make for their value
+    /// text.
+    fn value_text(self, value: f64) -> String {
+        match self {
+            NoteParam::Velocity | NoteParam::Resonance => format!("{:.0}%", value * 100.0),
+            NoteParam::Pan => format!("{:+.2}", value - 0.5),
+            NoteParam::Release => {
+                let r = value.clamp(0.0, 1.0);
+                let secs = if r <= 0.5 { (r / 0.5) * 0.05 } else { 0.05 + ((r - 0.5) / 0.5) * (2.0 - 0.05) };
+                format!("{:.2}s", secs)
+            }
+            NoteParam::Cutoff => {
+                let hz = 50.0 * (20_000.0_f64 / 50.0).powf(value.clamp(0.0, 1.0));
+                format!("{:.0}Hz", hz)
+            }
+            NoteParam::FinePitch => format!("{:+.0}c", value),
+        }
+    }
+}
+
+/// What a freshly placed note's properties start at, and what the
+/// properties panel edits when nothing is selected — Allodium-tauri's own
+/// `noteDefaults`.
 #[derive(Clone, Copy)]
-struct VelocityDrag {
+struct NoteDefaults {
+    velocity: f64,
+    pan: f64,
+    release: f64,
+    mod_x: f64,
+    mod_y: f64,
+    fine_pitch: f64,
+    color: u32,
+    slide: bool,
+}
+
+impl Default for NoteDefaults {
+    fn default() -> Self {
+        let n = Note::default();
+        NoteDefaults { velocity: DEFAULT_VELOCITY, pan: n.pan, release: n.release, mod_x: n.mod_x, mod_y: n.mod_y, fine_pitch: n.fine_pitch, color: n.color, slide: n.slide }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ParamDrag {
+    param: NoteParam,
     start_mouse_y: f32,
     start_value: f64,
 }
@@ -237,14 +412,14 @@ pub struct PianoRoll {
     /// pan/release/modX/modY/finePitch/color/slide are all declined, see
     /// this module's own top doc comment), but still toggled the same way.
     show_note_props: bool,
-    /// What a freshly placed note's velocity is, and what the properties
-    /// panel edits when nothing is selected — Allodium-tauri's own
-    /// `noteDefaults.props.velocity`.
-    default_velocity: f64,
-    /// Click-drag state for the properties panel's velocity dial, same
-    /// vertical-drag-to-value convention as every other `dial` in this
-    /// app (`widgets::dial`'s own doc comment).
-    velocity_drag: Option<VelocityDrag>,
+    /// What a freshly placed note's properties start at, and what the
+    /// panel edits when nothing is selected — `NoteDefaults`'s own doc
+    /// comment.
+    defaults: NoteDefaults,
+    /// Click-drag state for whichever properties-panel dial is currently
+    /// being dragged, same vertical-drag-to-value convention as every
+    /// other `dial` in this app (`widgets::dial`'s own doc comment).
+    param_drag: Option<ParamDrag>,
     dying: Vec<DyingNote>,
     /// The grid canvas's own on-screen origin, captured from its `canvas`
     /// paint closure each frame. Plain `div()`s don't hand their own
@@ -279,9 +454,13 @@ impl PianoRoll {
             last_length: DEFAULT_NOTE_LEN,
             tool: PianoRollTool::Draw,
             selected: HashSet::new(),
-            show_note_props: false,
-            default_velocity: DEFAULT_VELOCITY,
-            velocity_drag: None,
+            // Matches Allodium-tauri's own `PianoRoll.svelte`
+            // (`let showNoteProps = $state(true);`) — open by default,
+            // not an opt-in the user has to discover via the toolbar
+            // toggle first.
+            show_note_props: true,
+            defaults: NoteDefaults::default(),
+            param_drag: None,
             dying: Vec::new(),
             grid_origin: Rc::new(Cell::new(point(px(0.0), px(0.0)))),
             grid_size: Rc::new(Cell::new(size(px(0.0), px(0.0)))),
@@ -481,7 +660,21 @@ impl PianoRoll {
                             // immediately selected and ready to drag.
                             let max_len = (self.pattern_length_steps as f64 - step).max(1.0);
                             let length = self.last_length.min(max_len);
-                            let note = Note { id: next_note_id(&self.notes), pitch, start: step, length, velocity: self.default_velocity };
+                            let d = self.defaults;
+                            let note = Note {
+                                id: next_note_id(&self.notes),
+                                pitch,
+                                start: step,
+                                length,
+                                velocity: d.velocity,
+                                pan: d.pan,
+                                release: d.release,
+                                mod_x: d.mod_x,
+                                mod_y: d.mod_y,
+                                fine_pitch: d.fine_pitch,
+                                color: d.color,
+                                slide: d.slide,
+                            };
                             let note_id = note.id;
                             self.notes.push(note);
                             self.selected = std::iter::once(note_id).collect();
@@ -764,82 +957,214 @@ impl PianoRoll {
         });
     }
 
-    /// Minimal Note Properties panel: velocity only (the sole per-note
-    /// property this rewrite's `Note` has — see this module's own top doc
-    /// comment on declined fidelity). Edits every selected note at once
-    /// when there's a selection; otherwise edits `default_velocity`, what
-    /// a freshly placed note gets next, matching the original's own
-    /// "otherwise `noteDefaults`" fallback. Mixed-value display (the
-    /// original's dimmed "MIXED" label when selected notes disagree) is
-    /// skipped — this just shows the first selected note's value.
+    /// Note Properties panel: velocity, pan, release, filter cutoff/
+    /// resonance, and fine pitch ("pitch bend") dials (`NoteParam`), plus
+    /// a color swatch picker and a slide toggle. Edits every selected
+    /// note at once when there's a selection; otherwise edits
+    /// `self.defaults` (what a freshly placed note gets next), matching
+    /// the original's own "edits the selected notes when there are any,
+    /// otherwise `noteDefaults`." Mixed-value display (the original's
+    /// dimmed "MIXED" label when selected notes disagree) is skipped —
+    /// this just shows the first selected note's value for each control.
+    /// Docked on the Piano Roll's left, same as Allodium-tauri's own
+    /// `.np` (`NotePropertiesPanel.svelte`) — a fixed-width vertical
+    /// column (scope label, dials in a 3-wide grid, slide toggle, color
+    /// palette), not a header row, placed as the first child of the
+    /// piano-keys+grid flex row in `render` rather than above the whole
+    /// panel.
     fn render_note_properties(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected_velocity = self.selected.iter().next().and_then(|id| self.notes.iter().find(|n| n.id == *id)).map(|n| n.velocity);
-        let value = selected_velocity.unwrap_or(self.default_velocity);
-        let label = if self.selected.is_empty() { "Velocity (new notes)".to_string() } else { format!("Velocity ({} note{})", self.selected.len(), if self.selected.len() == 1 { "" } else { "s" }) };
+        const PANEL_W: f32 = 138.0;
+
+        let first_selected = self.selected.iter().next().and_then(|id| self.notes.iter().find(|n| n.id == *id));
+        let label = if self.selected.is_empty() {
+            "New notes".to_string()
+        } else {
+            format!("{} selected note{}", self.selected.len(), if self.selected.len() == 1 { "" } else { "s" })
+        };
+        let selected_color = first_selected.map(|n| n.color).unwrap_or(self.defaults.color);
+        let selected_slide = first_selected.map(|n| n.slide).unwrap_or(self.defaults.slide);
         let this_entity = cx.entity();
 
+        let dial_cell = |this: &Self, cx: &mut Context<Self>, param: NoteParam| {
+            let value = first_selected.map(|n| param.get(n)).unwrap_or_else(|| param.get_default(&this.defaults));
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .child(crate::widgets::dial(
+                    ("pr-param", param as usize),
+                    param.name(),
+                    param.value_text(value),
+                    value - param.min(),
+                    param.max() - param.min(),
+                    210.0,
+                    300.0,
+                    20.0,
+                    cx.listener(move |this, ev: &MouseDownEvent, _, _| this.begin_param_drag(param, f32::from(ev.position.y))),
+                    {
+                        let entity = this_entity.clone();
+                        move |_: &mut Window, cx: &mut gpui::App| entity.update(cx, |pr, cx| pr.set_param(param, param.reset_value(), cx))
+                    },
+                    cx.listener(|_this, _ev: &(bool, &'static str, String), _, _| {}),
+                ))
+                .child(div().text_size(px(8.0)).text_color(theme::BTN_TEXT).child(param.name()))
+        };
+
+        let mut dial_rows = div().flex().flex_col().gap_2();
+        for chunk in NoteParam::ALL.chunks(3) {
+            let mut dial_row = div().flex().justify_between();
+            for param in chunk {
+                dial_row = dial_row.child(dial_cell(self, cx, *param));
+            }
+            dial_rows = dial_rows.child(dial_row);
+        }
+
         div()
-            .h(px(28.0))
-            .w_full()
+            .id("note-properties")
+            .w(px(PANEL_W))
+            .h_full()
+            .flex_shrink_0()
             .flex()
-            .items_center()
-            .gap_2()
-            .px_2()
+            .flex_col()
+            .gap_3()
+            .p_2()
+            .overflow_y_scroll()
             .bg(theme::HEADER_BG)
-            .border_b_1()
+            .border_r_1()
             .border_color(theme::BORDER)
-            .child(div().text_size(px(10.0)).text_color(theme::accent_dim()).child(label))
-            .child(crate::widgets::dial(
-                "pr-velocity",
-                "Velocity",
-                format!("{:.0}%", value * 100.0),
-                value,
-                1.0,
-                210.0,
-                300.0,
-                20.0,
-                cx.listener(|this, ev: &MouseDownEvent, _, _| this.begin_velocity_drag(f32::from(ev.position.y))),
-                {
-                    let entity = this_entity.clone();
-                    move |_: &mut Window, cx: &mut gpui::App| entity.update(cx, |pr, cx| pr.set_velocity(1.0, cx))
-                },
-                cx.listener(|_this, _ev: &(bool, &'static str, String), _, _| {}),
-            ))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_center()
+                    .text_color(if self.selected.is_empty() { theme::BTN_TEXT } else { theme::accent() })
+                    .child(label),
+            )
+            .child(dial_rows)
+            .child(
+                div()
+                    .id("pr-slide")
+                    .w_full()
+                    .h(px(26.0))
+                    .rounded(theme::RADIUS_SM)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .cursor_pointer()
+                    .text_size(px(11.0))
+                    .border_1()
+                    .text_color(if selected_slide { theme::accent() } else { theme::BTN_TEXT })
+                    .border_color(if selected_slide { theme::accent().alpha(0.4) } else { theme::BTN_BORDER })
+                    .when(selected_slide, |d| d.bg(theme::accent().alpha(0.1)))
+                    .hover(|s| if selected_slide { s } else { s.bg(theme::BTN_HOVER).text_color(theme::MAIN_TEXT) })
+                    .child(Icon::new(IconName::TrendingUp).small())
+                    .child("Slide")
+                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| this.set_slide(!selected_slide, cx))),
+            )
+            .child({
+                let swatches = note_color_palette().into_iter().enumerate().map(|(i, rgb)| {
+                    let active = selected_color == rgb;
+                    div()
+                        .id(("pr-color", i))
+                        .w(px(16.0))
+                        .h(px(16.0))
+                        .rounded(theme::RADIUS_XS)
+                        .bg(gpui::rgb(rgb))
+                        .cursor_pointer()
+                        .when(active, |d| d.border_2().border_color(theme::MAIN_TEXT))
+                        .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| this.set_color(rgb, cx)))
+                        .into_any_element()
+                });
+                let none_swatch = {
+                    let active = selected_color == 0;
+                    div()
+                        .id("pr-color-none")
+                        .w(px(16.0))
+                        .h(px(16.0))
+                        .rounded(theme::RADIUS_XS)
+                        .border_1()
+                        .border_color(theme::BTN_BORDER)
+                        .cursor_pointer()
+                        .when(active, |d| d.border_2().border_color(theme::MAIN_TEXT))
+                        .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| this.set_color(0, cx)))
+                        .into_any_element()
+                };
+                div().flex().flex_wrap().gap_1().justify_center().children(swatches.chain(std::iter::once(none_swatch)))
+            })
     }
 
-    fn begin_velocity_drag(&mut self, start_mouse_y: f32) {
-        self.velocity_drag = Some(VelocityDrag { start_mouse_y, start_value: self.selected.iter().next().and_then(|id| self.notes.iter().find(|n| n.id == *id)).map(|n| n.velocity).unwrap_or(self.default_velocity) });
+    fn begin_param_drag(&mut self, param: NoteParam, start_mouse_y: f32) {
+        let start_value =
+            self.selected.iter().next().and_then(|id| self.notes.iter().find(|n| n.id == *id)).map(|n| param.get(n)).unwrap_or_else(|| param.get_default(&self.defaults));
+        self.param_drag = Some(ParamDrag { param, start_mouse_y, start_value });
     }
 
-    fn update_velocity_drag(&mut self, mouse_y: f32, cx: &mut Context<Self>) {
-        let Some(drag) = self.velocity_drag else { return };
-        const VELOCITY_DRAG_SENSITIVITY: f32 = 150.0;
+    fn update_param_drag(&mut self, mouse_y: f32, cx: &mut Context<Self>) {
+        let Some(drag) = self.param_drag else { return };
+        const PARAM_DRAG_SENSITIVITY: f32 = 150.0;
         let dy = drag.start_mouse_y - mouse_y;
-        let value = (drag.start_value + (dy / VELOCITY_DRAG_SENSITIVITY) as f64).clamp(0.0, 1.0);
-        self.set_velocity(value, cx);
+        let span = drag.param.max() - drag.param.min();
+        let value = (drag.start_value + (dy / PARAM_DRAG_SENSITIVITY) as f64 * span).clamp(drag.param.min(), drag.param.max());
+        self.set_param(drag.param, value, cx);
     }
 
-    fn end_velocity_drag(&mut self) {
-        self.velocity_drag = None;
+    fn end_param_drag(&mut self) {
+        self.param_drag = None;
     }
 
-    /// Writes `value` to every selected note's velocity, or
-    /// `default_velocity` (what the *next* placed note gets) with nothing
-    /// selected — the properties panel's own dial drives this, same split
-    /// as the original's "edits the selected notes when there are any,
+    /// Writes `value` to every selected note's `param`, or to
+    /// `self.defaults` (what the *next* placed note gets) with nothing
+    /// selected — every properties-panel dial drives this, same split as
+    /// the original's "edits the selected notes when there are any,
     /// otherwise `noteDefaults`."
-    fn set_velocity(&mut self, value: f64, cx: &mut Context<Self>) {
+    fn set_param(&mut self, param: NoteParam, value: f64, cx: &mut Context<Self>) {
         if self.selected.is_empty() {
-            self.default_velocity = value;
+            param.set_default(&mut self.defaults, value);
             cx.notify();
             return;
         }
         for note in self.notes.iter_mut().filter(|n| self.selected.contains(&n.id)) {
-            note.velocity = value;
+            param.set(note, value);
         }
         let Some(channel_id) = self.loaded_channel_id else { return };
         self.commit_live(channel_id, cx);
     }
+
+    fn set_color(&mut self, rgb: u32, cx: &mut Context<Self>) {
+        if self.selected.is_empty() {
+            self.defaults.color = rgb;
+            cx.notify();
+            return;
+        }
+        for note in self.notes.iter_mut().filter(|n| self.selected.contains(&n.id)) {
+            note.color = rgb;
+        }
+        let Some(channel_id) = self.loaded_channel_id else { return };
+        self.commit_live(channel_id, cx);
+    }
+
+    fn set_slide(&mut self, slide: bool, cx: &mut Context<Self>) {
+        if self.selected.is_empty() {
+            self.defaults.slide = slide;
+            cx.notify();
+            return;
+        }
+        for note in self.notes.iter_mut().filter(|n| self.selected.contains(&n.id)) {
+            note.slide = slide;
+        }
+        let Some(channel_id) = self.loaded_channel_id else { return };
+        self.commit_live(channel_id, cx);
+    }
+}
+
+/// A fixed palette of evenly-spaced hues for the properties panel's color
+/// swatches — Allodium-tauri's own fixed 15-color note palette, just
+/// generated instead of hand-picked (same `hsl_to_rgb_u32` the Channel
+/// Rack's "Recolor randomly" already uses).
+fn note_color_palette() -> Vec<u32> {
+    const COUNT: usize = 10;
+    (0..COUNT).map(|i| crate::color_utils::hsl_to_rgb_u32(i as f32 / COUNT as f32, 0.55, 0.55)).collect()
 }
 
 impl Render for PianoRoll {
@@ -989,22 +1314,21 @@ impl Render for PianoRoll {
             .flex()
             .flex_col()
             .bg(theme::BG_APP)
-            // The velocity dial's own drag (`render_note_properties`)
-            // tracks here rather than on the small dial itself, same
-            // reason every other dial-driving container in this app
-            // (e.g. `ChannelRack`'s own root div) does it at this level:
-            // a drag has to keep updating even once the cursor leaves the
-            // dial's own tiny hitbox.
+            // Whichever properties-panel dial is being dragged
+            // (`render_note_properties`) tracks here rather than on the
+            // small dial itself, same reason every other dial-driving
+            // container in this app (e.g. `ChannelRack`'s own root div)
+            // does it at this level: a drag has to keep updating even
+            // once the cursor leaves the dial's own tiny hitbox.
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
-                if this.velocity_drag.is_some() {
-                    this.update_velocity_drag(f32::from(ev.position.y), cx);
+                if this.param_drag.is_some() {
+                    this.update_param_drag(f32::from(ev.position.y), cx);
                 }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_velocity_drag()))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_velocity_drag()))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_param_drag()))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_param_drag()))
             .child(self.render_toolbar(cx))
             .child(self.render_channel_picker(cx))
-            .when(self.show_note_props, |d| d.child(self.render_note_properties(cx)))
             .child(
                 div()
                     .relative()
@@ -1012,6 +1336,7 @@ impl Render for PianoRoll {
                     .w_full()
                     .flex()
                     .overflow_hidden()
+                    .when(self.show_note_props, |d| d.child(self.render_note_properties(cx)))
                     .child(piano_keys(self.scroll_y, self.channel_rack.read(cx).held_pitches()))
                     .child(
                         div()
@@ -1190,14 +1515,15 @@ fn paint_grid(
         if note.pitch < first_visible_pitch - 1 || note.pitch > last_visible_pitch + 1 {
             continue;
         }
-        paint_note(window, origin, scroll_x, scroll_y, note, ghost_color, 1.0);
+        paint_note(window, origin, scroll_x, scroll_y, note, ghost_color, 1.0, 0.0, gpui::transparent_black());
     }
 
-    // While a selection exists, selected notes draw brighter and everything
-    // else dims — the original's own "every unselected note dims to 40%
-    // while a selection exists," minus the white-rim/glow/stripe treatment
-    // (no diagonal-stripe drawing primitive here, see this module's own
-    // top doc comment on declined fidelity).
+    // Each note draws in its own `Note::color` (falling back to the
+    // channel's accent when unset). While a selection exists, selected
+    // notes additionally get a bright rim (standing in for the original's
+    // white-rim/glow/diagonal-stripe treatment — no stripe-drawing
+    // primitive here, see this module's own top doc comment on declined
+    // fidelity) and everything unselected dims to 40%.
     for note in notes {
         if note.start + note.length <= visible_start || note.start > visible_end {
             continue;
@@ -1205,14 +1531,11 @@ fn paint_grid(
         if note.pitch < first_visible_pitch - 1 || note.pitch > last_visible_pitch + 1 {
             continue;
         }
-        let note_color = if selected.is_empty() {
-            theme::accent()
-        } else if selected.contains(&note.id) {
-            theme::accent_hover()
-        } else {
-            theme::accent().alpha(0.4)
-        };
-        paint_note(window, origin, scroll_x, scroll_y, note, note_color, 1.0);
+        let base_color: Hsla = if note.color != 0 { gpui::rgb(note.color).into() } else { theme::accent() };
+        let is_selected = selected.contains(&note.id);
+        let note_color = if selected.is_empty() || is_selected { base_color } else { base_color.alpha(0.4) };
+        let (border_width, border_color) = if is_selected { (1.5, theme::MAIN_TEXT) } else { (0.0, gpui::transparent_black()) };
+        paint_note(window, origin, scroll_x, scroll_y, note, note_color, 1.0, border_width, border_color);
     }
 
     // Dying notes: a brief flash that fades and shrinks slightly.
@@ -1220,7 +1543,7 @@ fn paint_grid(
         let alpha = (1.0 - progress).max(0.0);
         let mut color = theme::warm_accent();
         color.a = alpha;
-        paint_note(window, origin, scroll_x, scroll_y, note, color, alpha);
+        paint_note(window, origin, scroll_x, scroll_y, note, color, alpha, 0.0, gpui::transparent_black());
     }
 
     // Playhead overlay, drawn last so it's always on top; tracks scroll.
@@ -1240,6 +1563,7 @@ fn paint_grid(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_note(
     window: &mut Window,
     origin: Point<gpui::Pixels>,
@@ -1248,6 +1572,8 @@ fn paint_note(
     note: &Note,
     color: Hsla,
     scale: f32,
+    border_width: f32,
+    border_color: Hsla,
 ) {
     let x = origin.x + px(step_to_x(note.start) - scroll_x + 0.5);
     let y = origin.y + px(pitch_to_y(note.pitch) - scroll_y + 0.5);
@@ -1257,8 +1583,8 @@ fn paint_note(
         gpui::Bounds { origin: point(x, y), size: size(px(w), px(h)) },
         px(2.0),
         color,
-        px(0.0),
-        gpui::transparent_black(),
+        px(border_width),
+        border_color,
         Default::default(),
     ));
 }

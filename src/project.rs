@@ -51,6 +51,70 @@ pub struct Note {
     pub start: f64,
     pub length: f64,
     pub velocity: f64,
+    /// Offset on top of the channel's own pan, `0.5` = none (same
+    /// 0..1 convention `Channel::pan` uses) — Allodium-tauri's own
+    /// per-note `pan`. Added after the first cut, so `#[serde(default)]`
+    /// (defaulting to `0.5`, i.e. no offset) per this file's own
+    /// top-of-file convention.
+    #[serde(default = "default_note_pan")]
+    pub pan: f64,
+    /// `0..1`; `0.5` is the engine's old fixed ~50ms release, higher
+    /// rings on past the note's own scheduled end (up to ~2s) —
+    /// Allodium-tauri's own per-note `release`.
+    #[serde(default = "default_note_release")]
+    pub release: f64,
+    /// Lowpass filter cutoff, `0..1` mapped to 50Hz–20kHz (`1.0` = fully
+    /// open, no audible filtering) — Allodium-tauri's own `modX`.
+    #[serde(default = "default_note_mod_x")]
+    pub mod_x: f64,
+    /// Lowpass filter resonance/Q, `0..1` — Allodium-tauri's own `modY`.
+    #[serde(default)]
+    pub mod_y: f64,
+    /// Fine pitch offset in cents, `-1200..=1200` — Allodium-tauri's own
+    /// `finePitch` ("pitch bend").
+    #[serde(default)]
+    pub fine_pitch: f64,
+    /// Packed `0xRRGGBB`, same sentinel convention `Channel::color` uses
+    /// (`0` = unset, falls back to the channel's own color when drawn).
+    #[serde(default)]
+    pub color: u32,
+    /// A slide note never sounds on its own; when its step fires, every
+    /// still-ringing voice of this same channel *and* same `color`
+    /// glides its pitch to this note's own (`pitch` + `fine_pitch`) over
+    /// `length`, then holds there — Allodium-tauri's own `slide`.
+    #[serde(default)]
+    pub slide: bool,
+}
+
+fn default_note_pan() -> f64 {
+    0.5
+}
+
+fn default_note_release() -> f64 {
+    0.5
+}
+
+fn default_note_mod_x() -> f64 {
+    1.0
+}
+
+impl Default for Note {
+    fn default() -> Self {
+        Note {
+            id: 0,
+            pitch: STEP_PITCH,
+            start: 0.0,
+            length: 1.0,
+            velocity: 1.0,
+            pan: default_note_pan(),
+            release: default_note_release(),
+            mod_x: default_note_mod_x(),
+            mod_y: 0.0,
+            fine_pitch: 0.0,
+            color: 0,
+            slide: false,
+        }
+    }
 }
 
 /// A channel's note content for one specific pattern. Channels are shared
@@ -99,7 +163,7 @@ fn migrate_steps_to_notes(project: &mut ProjectFile) {
         let mut next_id = entry.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
         for (i, &on) in entry.steps.iter().enumerate() {
             if on {
-                entry.notes.push(Note { id: next_id, pitch: STEP_PITCH, start: i as f64, length: 1.0, velocity: 1.0 });
+                entry.notes.push(Note { id: next_id, pitch: STEP_PITCH, start: i as f64, length: 1.0, velocity: 1.0, ..Default::default() });
                 next_id += 1;
             }
         }
@@ -324,7 +388,7 @@ mod tests {
             pattern_id: 1,
             channel_id: 1,
             steps: vec![true, false, false, true],
-            notes: vec![Note { id: 1, pitch: 72, start: 10.0, length: 2.0, velocity: 0.5 }],
+            notes: vec![Note { id: 1, pitch: 72, start: 10.0, length: 2.0, velocity: 0.5, ..Default::default() }],
         });
 
         migrate_steps_to_notes(&mut project);

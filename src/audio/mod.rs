@@ -98,6 +98,7 @@ pub fn build_song_snapshot(project: &ProjectFile, samples: &HashMap<String, Arc<
                     .iter()
                     .find(|e| e.pattern_id == pattern.id && e.channel_id == ch.id);
                 Some(ChannelVoiceData {
+                    id: ch.id,
                     sample,
                     notes: content.map(|c| c.notes.clone()).unwrap_or_default(),
                     volume: ch.volume as f32,
@@ -123,6 +124,10 @@ pub fn build_song_snapshot(project: &ProjectFile, samples: &HashMap<String, Arc<
 /// flattened out of `ProjectFile`'s pattern-scoped content so the audio
 /// callback never has to walk the project model's structure itself.
 pub struct ChannelVoiceData {
+    /// `Channel::id` — needed so `trigger_channel_step` can match a
+    /// slide note's target voices to exactly this channel's own, not
+    /// some other channel's that happens to use the same note color.
+    pub id: u32,
     pub sample: Arc<SampleBuffer>,
     pub notes: Vec<Note>,
     pub volume: f32,
@@ -237,6 +242,7 @@ pub fn build_snapshot(
                 .iter()
                 .find(|e| e.pattern_id == pattern.id && e.channel_id == ch.id);
             Some(ChannelVoiceData {
+                id: ch.id,
                 sample,
                 notes: content.map(|c| c.notes.clone()).unwrap_or_default(),
                 volume: ch.volume as f32,
@@ -248,6 +254,97 @@ pub fn build_snapshot(
         .collect();
 
     Ok(PlaybackSnapshot { channels, pattern_length_steps, steps_per_bar: project.beats_per_bar.max(1) * 4 })
+}
+
+/// A one-pole-per-stage RBJ lowpass biquad, applied to a voice's mono
+/// sample before its pan split — Allodium-tauri's own per-note `modX`
+/// (cutoff)/`modY` (resonance/Q) filter. `bypass()` (the no-filter case —
+/// every voice that isn't a Piano-Roll/step note, and a note at its
+/// default `mod_x: 1.0` which maps to a cutoff at/above Nyquist) skips the
+/// coefficient math entirely rather than running an identity filter, so
+/// the common "no filtering" case costs nothing extra per sample.
+enum BiquadLowpass {
+    Bypass,
+    Active { b0: f32, b1: f32, b2: f32, a1: f32, a2: f32, x1: f32, x2: f32, y1: f32, y2: f32 },
+}
+
+impl BiquadLowpass {
+    fn bypass() -> Self {
+        BiquadLowpass::Bypass
+    }
+
+    /// `cutoff_hz` at/above ~49% of `sample_rate` (Nyquist) is treated as
+    /// "fully open" — the RBJ formula's `sin`/`cos` terms become
+    /// numerically unstable right at Nyquist, and a note's default
+    /// `mod_x: 1.0` maps to 20kHz, which is above Nyquist at common
+    /// sample rates anyway (so this is also just the common case, not an
+    /// edge case).
+    fn new(cutoff_hz: f32, q: f32, sample_rate: u32) -> Self {
+        let nyquist = sample_rate as f32 * 0.5;
+        if cutoff_hz >= nyquist * 0.98 {
+            return BiquadLowpass::Bypass;
+        }
+        let omega = 2.0 * std::f32::consts::PI * cutoff_hz.max(20.0) / sample_rate as f32;
+        let (sin_o, cos_o) = (omega.sin(), omega.cos());
+        let alpha = sin_o / (2.0 * q.max(0.01));
+        let a0 = 1.0 + alpha;
+        BiquadLowpass::Active {
+            b0: ((1.0 - cos_o) / 2.0) / a0,
+            b1: (1.0 - cos_o) / a0,
+            b2: ((1.0 - cos_o) / 2.0) / a0,
+            a1: (-2.0 * cos_o) / a0,
+            a2: (1.0 - alpha) / a0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+
+    fn process(&mut self, x: f32) -> f32 {
+        let BiquadLowpass::Active { b0, b1, b2, a1, a2, x1, x2, y1, y2 } = self else { return x };
+        let y = *b0 * x + *b1 * *x1 + *b2 * *x2 - *a1 * *y1 - *a2 * *y2;
+        *x2 = *x1;
+        *x1 = x;
+        *y2 = *y1;
+        *y1 = y;
+        y
+    }
+}
+
+/// `Note::mod_x` (`0..1`) to a filter cutoff in Hz, logarithmic 50Hz–20kHz
+/// so the control feels even across its range (a linear Hz mapping would
+/// spend most of the knob's travel on frequencies nobody can hear the
+/// difference between). `1.0` (the default) lands at 20kHz, i.e.
+/// `BiquadLowpass::new`'s own "fully open" bypass range.
+fn mod_x_to_cutoff_hz(mod_x: f64) -> f32 {
+    const MIN_HZ: f32 = 50.0;
+    const MAX_HZ: f32 = 20_000.0;
+    MIN_HZ * (MAX_HZ / MIN_HZ).powf(mod_x.clamp(0.0, 1.0) as f32)
+}
+
+/// `Note::mod_y` (`0..1`) to filter Q (resonance) — `0.0` (the default) is
+/// a gentle non-resonant rolloff, `1.0` a sharp resonant peak at cutoff.
+fn mod_y_to_q(mod_y: f64) -> f32 {
+    const MIN_Q: f32 = 0.5;
+    const MAX_Q: f32 = 10.0;
+    MIN_Q + (MAX_Q - MIN_Q) * mod_y.clamp(0.0, 1.0) as f32
+}
+
+/// `Note::fine_pitch` (cents, `-1200..=1200`) to a playback-rate
+/// multiplier — same `2^(n/12)` family `pitch_to_playback_rate` uses, just
+/// in cents (1/100 semitone) instead of whole semitones.
+fn cents_to_rate_multiplier(cents: f64) -> f64 {
+    2f64.powf(cents / 1200.0)
+}
+
+/// A note-to-note pitch glide in progress on a voice — `Note::slide`'s
+/// own doc comment covers when one of these gets started.
+struct Slide {
+    start_rate: f64,
+    target_rate: f64,
+    start_frame: u64,
+    duration_frames: u64,
 }
 
 /// A currently-sounding one-shot: a sample, an envelope, and a playback
@@ -273,9 +370,22 @@ struct Voice {
     /// voice to release. `None` for every other kind of voice (step/
     /// piano-roll-scheduled, preview, metronome click).
     live_pitch: Option<i32>,
+    filter: BiquadLowpass,
+    /// Which `ChannelVoiceData` (by `Channel::id`) and `Note::color` this
+    /// voice came from — `0`/`0` (never a real match, channel ids start
+    /// at 1 and `0` is the default/no-color sentinel colliding with any
+    /// other default-colored note, which is fine: it's the same bucket a
+    /// slide note with no explicit color would target too) for any voice
+    /// not triggered through `trigger_channel_step`. Lets a slide note
+    /// find exactly the voices it should bend, without needing a voice's
+    /// own back-reference to the project model.
+    channel_id: u32,
+    note_color: u32,
+    slide: Option<Slide>,
 }
 
 impl Voice {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         sample: Arc<SampleBuffer>,
         pitch_rate: f64,
@@ -284,9 +394,36 @@ impl Voice {
         envelope: Envelope,
         out_sample_rate: u32,
         bus: u32,
+        channel_id: u32,
+        note_color: u32,
+        filter: BiquadLowpass,
     ) -> Self {
         let rate_correction = sample.sample_rate as f64 / out_sample_rate as f64;
-        Voice { sample, pos: 0.0, playback_rate: pitch_rate * rate_correction, volume, pan, envelope, frames_played: 0, bus, live_pitch: None }
+        Voice {
+            sample,
+            pos: 0.0,
+            playback_rate: pitch_rate * rate_correction,
+            volume,
+            pan,
+            envelope,
+            frames_played: 0,
+            bus,
+            live_pitch: None,
+            filter,
+            channel_id,
+            note_color,
+            slide: None,
+        }
+    }
+
+    /// Every voice that isn't a Piano-Roll/step note triggered through
+    /// `trigger_channel_step` (preview, metronome clicks, song-mode
+    /// clips): none of those can ever be a slide target and none carry a
+    /// note's own filter settings, so this just fills those in with their
+    /// neutral values instead of making every one of those call sites
+    /// spell them out.
+    fn new_plain(sample: Arc<SampleBuffer>, pitch_rate: f64, volume: f32, pan: f32, envelope: Envelope, out_sample_rate: u32, bus: u32) -> Self {
+        Self::new(sample, pitch_rate, volume, pan, envelope, out_sample_rate, bus, 0, 0, BiquadLowpass::bypass())
     }
 
     /// A live-held note (QWERTY keyboard-to-piano key-down): sustains at
@@ -308,13 +445,38 @@ impl Voice {
             frames_played: 0,
             bus: 0,
             live_pitch: Some(pitch),
+            filter: BiquadLowpass::bypass(),
+            channel_id: 0,
+            note_color: 0,
+            slide: None,
         }
+    }
+
+    /// Starts (or re-targets, mid-glide) a pitch slide to `target_rate`
+    /// over `duration_frames` — `Note::slide`'s own doc comment. Reads
+    /// `self.playback_rate` as the glide's starting point, which is
+    /// itself still being updated by any slide already in progress, so a
+    /// slide arriving mid-glide naturally continues from wherever that
+    /// one had gotten to rather than jumping back to the voice's
+    /// original pitch first.
+    fn begin_slide(&mut self, target_rate: f64, duration_frames: u64) {
+        self.slide = Some(Slide { start_rate: self.playback_rate, target_rate, start_frame: self.frames_played, duration_frames });
     }
 
     /// Renders one output frame into `mix_l`/`mix_r`, advances position,
     /// and reports whether the voice is still alive.
     fn render(&mut self, mix_l: &mut f32, mix_r: &mut f32) -> bool {
         let Some(env_gain) = self.envelope.gain_at(self.frames_played) else { return false };
+        if let Some(slide) = &self.slide {
+            let into = self.frames_played.saturating_sub(slide.start_frame);
+            if into >= slide.duration_frames {
+                self.playback_rate = slide.target_rate;
+                self.slide = None;
+            } else {
+                let t = into as f64 / slide.duration_frames.max(1) as f64;
+                self.playback_rate = slide.start_rate + (slide.target_rate - slide.start_rate) * t;
+            }
+        }
         let total_frames = self.sample.frame_count();
         let idx = self.pos.floor() as u64;
         if idx >= total_frames {
@@ -323,7 +485,7 @@ impl Voice {
         let frac = self.pos.fract() as f32;
         let s0 = self.read_mono(idx);
         let s1 = if idx + 1 < total_frames { self.read_mono(idx + 1) } else { s0 };
-        let sample_val = s0 + (s1 - s0) * frac;
+        let sample_val = self.filter.process(s0 + (s1 - s0) * frac);
 
         let gain = env_gain * self.volume;
         // Equal-power pan, matching the project model's 0..1 pan range.
@@ -358,25 +520,45 @@ impl Voice {
 /// plays silence) — that's the original's "per-channel independent
 /// looping", still deferred per `02-feature-scope.md` in both modes, not a
 /// new gap this stage introduces.
+///
+/// A `note.slide` note never starts a voice of its own — instead it bends
+/// every still-ringing voice from this same channel and note color
+/// (`Voice::begin_slide`), per `Note::slide`'s own doc comment.
 fn trigger_channel_step(ch: &ChannelVoiceData, step: i64, bpm: f64, out_sample_rate: u32, voices: &mut Vec<Voice>) {
     if ch.muted || step < 0 {
         return;
     }
     for note in &ch.notes {
-        if note.start.round() as i64 == step {
-            let rate = pitch_to_playback_rate(note.pitch);
-            let duration_secs = note.length * step_duration_secs(bpm);
-            let duration_frames = (duration_secs * out_sample_rate as f64).max(1.0) as u64;
-            voices.push(Voice::new(
-                ch.sample.clone(),
-                rate,
-                ch.volume * note.velocity as f32,
-                ch.pan,
-                Envelope::shaped(duration_frames, out_sample_rate),
-                out_sample_rate,
-                ch.bus,
-            ));
+        if note.start.round() as i64 != step {
+            continue;
         }
+        let rate = pitch_to_playback_rate(note.pitch) * cents_to_rate_multiplier(note.fine_pitch);
+        let duration_secs = note.length * step_duration_secs(bpm);
+        let duration_frames = (duration_secs * out_sample_rate as f64).max(1.0) as u64;
+
+        if note.slide {
+            for voice in voices.iter_mut() {
+                if voice.channel_id == ch.id && voice.note_color == note.color {
+                    voice.begin_slide(rate, duration_frames);
+                }
+            }
+            continue;
+        }
+
+        let pan = (ch.pan + (note.pan as f32 - 0.5)).clamp(0.0, 1.0);
+        let filter = BiquadLowpass::new(mod_x_to_cutoff_hz(note.mod_x), mod_y_to_q(note.mod_y), out_sample_rate);
+        voices.push(Voice::new(
+            ch.sample.clone(),
+            rate,
+            ch.volume * note.velocity as f32,
+            pan,
+            Envelope::shaped_with_release(duration_frames, note.release, out_sample_rate),
+            out_sample_rate,
+            ch.bus,
+            ch.id,
+            note.color,
+            filter,
+        ));
     }
 }
 
@@ -886,7 +1068,7 @@ impl AudioEngine {
                                 steps_per_bar = new_bar.max(1) as i64;
                             }
                             EngineMessage::Preview { sample, volume, pan } => {
-                                voices.push(Voice::new(sample, 1.0, volume, pan, Envelope::ring(out_sample_rate), out_sample_rate, 0));
+                                voices.push(Voice::new_plain(sample, 1.0, volume, pan, Envelope::ring(out_sample_rate), out_sample_rate, 0));
                             }
                             EngineMessage::LiveNoteOn { pitch, sample, volume, pan } => {
                                 for v in voices.iter_mut() {
@@ -938,7 +1120,7 @@ impl AudioEngine {
                             // double-fires on the same step.
                             if is_new_step && callback_state.metronome.load(Ordering::Relaxed) && whole_step >= 0 {
                                 if whole_step % steps_per_bar == 0 {
-                                    voices.push(Voice::new(
+                                    voices.push(Voice::new_plain(
                                         accent_sample.clone(),
                                         1.0,
                                         0.9,
@@ -948,7 +1130,7 @@ impl AudioEngine {
                                         0,
                                     ));
                                 } else if whole_step % 4 == 0 {
-                                    voices.push(Voice::new(
+                                    voices.push(Voice::new_plain(
                                         click_sample.clone(),
                                         1.0,
                                         0.7,
@@ -992,7 +1174,7 @@ impl AudioEngine {
                                     // Playlist block reserves.
                                     for clip in &song_clips {
                                         if clip.start_step as i64 == whole_step {
-                                            voices.push(Voice::new(
+                                            voices.push(Voice::new_plain(
                                                 clip.sample.clone(),
                                                 1.0,
                                                 1.0,
@@ -1348,7 +1530,7 @@ mod song_snapshot_tests {
         project.content.items.push(PatternContentEntry {
             pattern_id: 2,
             channel_id: 1,
-            notes: vec![Note { id: 1, pitch: 60, start: 18.0, length: 2.0, velocity: 1.0 }],
+            notes: vec![Note { id: 1, pitch: 60, start: 18.0, length: 2.0, velocity: 1.0, ..Default::default() }],
             ..Default::default()
         });
         project.placements.items.push(Placement { id: 1, pattern_id: 2, track_id: 0, start_beat: 0.0, sample_path: String::new(), length_beats: 0.0 });
@@ -1385,7 +1567,7 @@ mod pattern_snapshot_tests {
         project.content.items.push(PatternContentEntry {
             pattern_id: 1,
             channel_id: 1,
-            notes: vec![Note { id: 1, pitch: 60, start: 18.0, length: 2.0, velocity: 1.0 }],
+            notes: vec![Note { id: 1, pitch: 60, start: 18.0, length: 2.0, velocity: 1.0, ..Default::default() }],
             ..Default::default()
         });
 
