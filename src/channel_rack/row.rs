@@ -61,6 +61,78 @@ fn channel_drag_preview(_payload: &ChannelDragPayload, _offset: Point<Pixels>, _
     cx.new(|_| ChannelDragPreview)
 }
 
+/// Whether a channel's notes were drawn in the Piano Roll (arbitrary
+/// pitch/length) rather than toggled on/off in the step sequencer here —
+/// anything that isn't the exact `{ pitch: STEP_PITCH, length: 1.0 }`
+/// shape `step_note_index` looks for. The step row can only ever show
+/// on/off per step, so it can't represent such a channel faithfully; it
+/// gets the mini piano-roll strip (`render_piano_preview`) instead.
+fn is_piano_roll_authored(notes: &[Note]) -> bool {
+    notes.iter().any(|n| n.pitch != STEP_PITCH || n.length != 1.0)
+}
+
+/// A read-only miniature of a channel's Piano Roll content, shown in the
+/// step row's place when `is_piano_roll_authored` says the step grid can't
+/// represent it: one plain background panel spanning the pattern (not the
+/// step row's per-step on/off blocks — those read as a step grid, which
+/// this channel isn't one of), with a thin playhead marker and each note
+/// drawn as a small bar on top — x in the same step-unit scale the step
+/// row uses, y auto-scaled to the channel's own pitch range (not the full
+/// keyboard) padded to at least an octave, so a single held note still
+/// draws as a visible bar instead of a hairline pinned to one edge.
+fn render_piano_preview(id: u32, notes: &[Note], step_count: usize, current_step: f64) -> Div {
+    const CELL_W: f32 = 20.0;
+    const GAP: f32 = 4.0;
+    const ROW_H: f32 = 28.0;
+    const NOTE_H: f32 = 3.0;
+
+    let total_w = step_count as f32 * (CELL_W + GAP) - GAP;
+    let mut preview = div()
+        .relative()
+        .w(px(total_w.max(0.0)))
+        .h(px(ROW_H))
+        .rounded(theme::RADIUS_XS)
+        .bg(theme::STEP_OFF_GREY);
+
+    if current_step >= 0.0 && current_step < step_count as f64 {
+        // A thin line, at the exact (unfloored) playback position in the
+        // same step-unit scale the notes below use — not the step row's
+        // own per-step ring (this preview has no per-step cells to ring),
+        // and not snapped to a step boundary, so it sweeps continuously
+        // across a step's width instead of jumping from one step to the
+        // next the way the step row's own playhead does.
+        let x = current_step as f32 * (CELL_W + GAP);
+        preview = preview.child(
+            div().id(("piano-preview-playhead", id as usize)).absolute().left(px(x)).top_0().w(px(2.0)).h(px(ROW_H)).bg(theme::accent_hover()),
+        );
+    }
+
+    let pitch_min = notes.iter().map(|n| n.pitch).min().unwrap_or(STEP_PITCH);
+    let pitch_max = notes.iter().map(|n| n.pitch).max().unwrap_or(STEP_PITCH);
+    let span = (pitch_max - pitch_min).max(12) as f32;
+    let mid = (pitch_min + pitch_max) as f32 / 2.0;
+    let lo = mid - span / 2.0;
+
+    for (note_idx, note) in notes.iter().enumerate() {
+        let x = note.start as f32 * (CELL_W + GAP);
+        let w = (note.length as f32 * (CELL_W + GAP) - GAP).max(2.0);
+        let t = ((note.pitch as f32 - lo) / span).clamp(0.0, 1.0);
+        let y = (1.0 - t) * (ROW_H - NOTE_H);
+        preview = preview.child(
+            div()
+                .id(("piano-preview-note", (id as usize) * 10_000 + note_idx))
+                .absolute()
+                .left(px(x))
+                .top(px(y))
+                .w(px(w))
+                .h(px(NOTE_H))
+                .rounded(theme::RADIUS_XS)
+                .bg(theme::accent()),
+        );
+    }
+    preview.flex_none()
+}
+
 /// Blends two colors channel-by-channel, `t = 0` giving `from` and `t = 1`
 /// giving `to` — used to fade a just-fired step's flash back down to its
 /// resting color.
@@ -303,6 +375,7 @@ impl ChannelRack {
         id: u32,
         _playing: bool,
         current_step: i64,
+        current_step_f64: f64,
         fired_fade: f32,
         pattern_id: u32,
         name_col_width: f32,
@@ -320,9 +393,12 @@ impl ChannelRack {
             .unwrap_or_default();
 
         let step_count = self.pattern_length_steps() as usize;
-        let mut step_row = div().flex().flex_row().gap_1();
-        for i in 0..step_count {
-            let on = step_note_index(&notes, i).is_some();
+        let grid_content: gpui::AnyElement = if is_piano_roll_authored(&notes) {
+            render_piano_preview(id, &notes, step_count, current_step_f64).into_any_element()
+        } else {
+            let mut step_row = div().flex().flex_row().gap_1();
+            for i in 0..step_count {
+                let on = step_note_index(&notes, i).is_some();
             let is_current = current_step == i as i64;
             // 4-step beat-group banding, matching the Piano Roll's own
             // beat-group shading — the two grids should read as one
@@ -381,6 +457,8 @@ impl ChannelRack {
                     })),
             );
         }
+            step_row.flex_none().into_any_element()
+        };
 
         let name_label = if ch.name.is_empty() { "Drop sample".to_string() } else { ch.name.clone() };
         let is_renaming = self.renaming_channel_id == Some(id);
@@ -634,7 +712,7 @@ impl ChannelRack {
                     .overflow_x_scroll()
                     .track_scroll(&self.steps_scroll)
                     .lock_scroll_axis()
-                    .child(step_row.flex_none()),
+                    .child(grid_content),
             )
     }
 }

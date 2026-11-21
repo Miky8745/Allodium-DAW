@@ -145,6 +145,10 @@ impl AppShell {
                 this.toolbar.hover = Some((name, value.clone()));
                 cx.notify();
             }
+            crate::channel_rack::ChannelRackEvent::OpenPianoRoll => {
+                this.geometry.get_mut(PanelKind::PianoRoll).open = true;
+                this.focus_panel(PanelKind::PianoRoll, cx);
+            }
         })
         .detach();
         let piano_roll = cx.new(|cx| PianoRoll::new(channel_rack.clone(), window, cx));

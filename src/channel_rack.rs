@@ -64,6 +64,14 @@ use drag::ActiveDrag;
 /// sink every other hoverable control in the app already reports to.
 pub enum ChannelRackEvent {
     HoverInfo(&'static str, String),
+    /// "Open in Piano Roll" (row context menu) and double-clicking a
+    /// row's sample box both call `select_channel` to pick which
+    /// channel's notes the Piano Roll shows — but that alone doesn't
+    /// raise or un-close the Piano Roll's own floating panel if it's
+    /// behind another one or closed, so `AppShell` (the only thing that
+    /// knows panel z-order/open state) needs its own signal to do that
+    /// part.
+    OpenPianoRoll,
 }
 
 impl EventEmitter<ChannelRackEvent> for ChannelRack {}
@@ -432,6 +440,13 @@ impl Render for ChannelRack {
 
         let playing = self.engine.is_playing();
         let song_mode = self.engine.is_song_mode();
+        // Continuous (unfloored) playback position in steps — the step
+        // row only ever needs to know *which* step is current (hence the
+        // floored `current_step` below), but the mini Piano-Roll preview
+        // (`row.rs`'s `render_piano_preview`) draws its playhead as a line
+        // that sweeps smoothly across a step's width instead of jumping
+        // from one step to the next.
+        let current_step_f64 = if playing { self.engine.current_step() } else { -1.0 };
         let current_step = if playing { self.engine.current_step().floor() as i64 } else { -1 };
         if current_step != self.last_step_index {
             self.last_step_index = current_step;
@@ -465,7 +480,7 @@ impl Render for ChannelRack {
         // no overflow is ever detected and nothing scrolls.
         let mut rows = div().flex_1().min_h_0().flex().flex_col();
         for (idx, id) in channel_ids.iter().copied().enumerate() {
-            rows = rows.child(self.render_row(idx, id, playing, current_step, fired_fade, pattern_id, name_col_width, &rack, cx));
+            rows = rows.child(self.render_row(idx, id, playing, current_step, current_step_f64, fired_fade, pattern_id, name_col_width, &rack, cx));
         }
 
         let footer = self.render_footer(song_mode, cx);

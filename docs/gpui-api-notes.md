@@ -93,6 +93,31 @@ behavior to replicate (pitch, ADSR, step-sequencer timing) once Stage 3
 starts — this note is only about *how to keep a clock consistent*, not what
 the DAW's scheduler needs to do.
 
+## Interaction/layout gotchas
+
+- **`.absolute()` escalates to the nearest `.relative()` *ancestor*, not
+  the nearest sibling or parent `div()`.** A plain `.absolute().size_full()`
+  overlay meant to cover one small sibling element (e.g. a click-catcher
+  over a scroll-field readout) will instead cover whatever large
+  positioned ancestor it actually finds — in one real case, an entire
+  Channel Rack row, silently eating clicks meant for the step grid
+  beneath it. Always wrap the overlay *and* the element it's meant to
+  cover in their own `div().relative()` so `size_full()` resolves against
+  that pair, not whatever happens to be positioned further up the tree.
+- **A `MouseMoveEvent.pressed_button` is ambient, not scoped to "this
+  drag."** Any element's `on_mouse_move` fires whenever the pointer
+  passes over it with a button held, regardless of *why* that button is
+  down — including an unrelated drag elsewhere (e.g. resizing a panel)
+  that happens to carry the pointer across a grid of per-cell click
+  targets below it. Checking `ev.pressed_button` alone cannot distinguish
+  "the user is dragging over me to paint" from "the user is dragging
+  something else and incidentally passed over me." For a drag-to-paint
+  gesture (e.g. click-and-drag across step-sequencer cells), track an
+  explicit boolean/enum state set only by the gesture's own `mouse_down`
+  and cleared by a window/panel-level `on_mouse_up`/`on_mouse_up_out`,
+  and gate the per-cell `on_mouse_move` handler on that state instead of
+  on `pressed_button` alone.
+
 ## Performance lessons
 
 - **Never put `eprintln!`/`println!` inside a per-event input handler**

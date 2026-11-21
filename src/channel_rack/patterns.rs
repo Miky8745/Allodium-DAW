@@ -7,7 +7,7 @@ use gpui::Context;
 
 use crate::project::{self, Channel, Pattern, Placement};
 
-use super::ChannelRack;
+use super::{ChannelRack, ChannelRackEvent};
 
 impl ChannelRack {
     pub fn channels(&self) -> &[Channel] {
@@ -20,6 +20,7 @@ impl ChannelRack {
 
     pub fn select_channel(&mut self, channel_id: u32, cx: &mut Context<Self>) {
         self.selected_channel_id = Some(channel_id);
+        cx.emit(ChannelRackEvent::OpenPianoRoll);
         cx.notify();
     }
 
