@@ -28,14 +28,32 @@
 //!   cosmetic cue) and no MIDI-input glow (no MIDI I/O in this rewrite).
 //! - **Added**: hover cursor affordance (grab/resize/not-allowed), so the
 //!   new resize zone is actually discoverable, not just functional.
+//! - **Added** (later pass, at the user's explicit request to go beyond
+//!   `02-feature-scope.md`'s own stretch-list deferral): the toolbar from
+//!   Allodium-tauri's `PianoRollHeader.svelte` — Draw/Delete/Marquee tool
+//!   buttons (`PianoRollTool`), a Play button that solos and plays just
+//!   the open channel (`toggle_solo_play`), and a Note Properties toggle.
+//!   Marquee is a real box-select (`DragMode::Marquee`,
+//!   `update_marquee_selection`) with Ctrl+drag available in every tool,
+//!   group-move for a multi-note selection, and Delete/Backspace/Escape
+//!   routed in from `AppShell`'s key dispatcher (`shell.rs`'s
+//!   `route_piano_roll_key`) while this panel is open and frontmost. The
+//!   properties panel is deliberately minimal — velocity only, the one
+//!   per-note property this rewrite's `Note` actually has; see the next
+//!   bullet for what's still out.
 //! - **Declined, matching `02-feature-scope.md`'s own stretch list**:
-//!   zoom, marquee/multi-select, copy/paste, note properties beyond
-//!   velocity, slide notes, auto-extend pattern length, the velocity
+//!   zoom, copy/paste, note properties beyond velocity (pan, release,
+//!   modX/modY, fine pitch, color, slide), slide notes, the velocity
 //!   lane, the overview/minimap strip, and per-channel independent-loop
 //!   playhead wrapping. Also declined: pitched audio preview on
 //!   place/move (the original's `audioEngine.previewNote`). This
 //!   engine's `AudioEngine::preview` has no pitch parameter yet, and
-//!   adding one is a real engine change, not a Piano Roll one.
+//!   adding one is a real engine change, not a Piano Roll one. Also
+//!   declined (simplification, not a missed spec item): the original's
+//!   "click without dragging on a note inside a multi-selection narrows
+//!   the selection to just it" and the white-rim/glow/diagonal-stripe
+//!   selected-note styling (dimming unselected notes to 40% covers the
+//!   same "a selection is active" cue without a stripe-drawing primitive).
 //! - **Declined, not a real bug to carry forward**: the original docs
 //!   themselves flag a historical bug: `NoteData.start`/`length` used
 //!   to be `u32`, which broke saving fractional notes before they were
@@ -43,9 +61,11 @@
 //!   `f64` from Stage 2 onward, so there's nothing to port here.
 
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Instant;
 
+use gpui::assets::IconName;
 use gpui::component::button::{Button, ButtonVariants};
 use gpui::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui::{
@@ -57,6 +77,7 @@ use gpui::{
 use crate::channel_rack::ChannelRack;
 use crate::project::Note;
 use crate::theme;
+use crate::widgets::icon_toggle;
 
 const PITCH_COUNT: i32 = 128;
 const KEY_H: f32 = 18.0;
@@ -97,16 +118,26 @@ fn next_note_id(notes: &[Note]) -> u32 {
     notes.iter().map(|n| n.id).max().unwrap_or(0) + 1
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum DragMode {
     None,
-    /// Dragging a note (freshly placed or pre-existing) by its body.
-    /// `grab_offset_steps`/`grab_offset_pitch` record where inside the note
-    /// the initial click landed, so the note doesn't jump under the cursor.
+    /// Dragging one note or a whole multi-selection by `anchor_note_id`'s
+    /// body (freshly placed, or pre-existing and possibly part of a larger
+    /// selection). `grab_offset_steps`/`grab_offset_pitch` record where
+    /// inside the anchor note the initial click landed, so it doesn't jump
+    /// under the cursor; `anchor_initial_*`/`initial_positions` are a
+    /// snapshot of every moving note's own position at drag start, so each
+    /// frame's new position is computed as "anchor's total displacement
+    /// since mousedown, applied to that note's own starting position"
+    /// rather than drifting from incremental per-frame deltas. A plain
+    /// single-note move is just this with a one-element `initial_positions`.
     Moving {
-        note_id: u32,
+        anchor_note_id: u32,
         grab_offset_steps: f64,
         grab_offset_pitch: i32,
+        anchor_initial_start: f64,
+        anchor_initial_pitch: i32,
+        initial_positions: Vec<(u32, f64, i32)>,
     },
     /// Dragging a note's right edge to change its length. Pitch stays
     /// locked, only `length` changes, anchored to the step the drag
@@ -117,8 +148,23 @@ enum DragMode {
         anchor_step: f64,
         orig_length: f64,
     },
-    /// Right-click-drag delete: remove every note the cursor passes over.
+    /// Right-click-drag delete (every tool), or left-click-drag delete
+    /// while the Delete tool is active: remove every note the cursor
+    /// passes over.
     Deleting,
+    /// A box-select drag — Marquee tool, or Ctrl+drag in any tool.
+    /// `base_selection` is whatever was already selected at drag start
+    /// (kept if the drag began with Shift held, for "add to selection";
+    /// otherwise empty), unioned on every move with whichever notes the
+    /// box from `(anchor_step, anchor_pitch)` to `(cur_step, cur_pitch)`
+    /// currently overlaps.
+    Marquee {
+        anchor_step: f64,
+        anchor_pitch: i32,
+        cur_step: f64,
+        cur_pitch: i32,
+        base_selection: HashSet<u32>,
+    },
 }
 
 /// Idle-hover classification, purely for cursor affordance, computed on
@@ -132,9 +178,30 @@ enum Hover {
     Resize,
 }
 
+/// The toolbar's tool selector — Allodium-tauri's own `EditTool` type
+/// (`editTools.ts`), shared there with the Playlist; here it's just the
+/// Piano Roll's own copy since the Playlist isn't in this rewrite's tool
+/// system yet. Same semantics: Draw places/selects/moves/resizes notes,
+/// Delete click-or-drags notes away, Marquee always drags a selection box.
+/// The right mouse button deletes in every tool regardless of which of
+/// these is active, and Ctrl+drag is always a marquee regardless of tool —
+/// both handled directly in `handle_mouse_down`, not through this enum.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PianoRollTool {
+    Draw,
+    Delete,
+    Marquee,
+}
+
 struct DyingNote {
     note: Note,
     died_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct VelocityDrag {
+    start_mouse_y: f32,
+    start_value: f64,
 }
 
 pub struct PianoRoll {
@@ -153,6 +220,31 @@ pub struct PianoRoll {
     /// just for cosmetic parity: without the clamp half of this, a
     /// short pattern could get a note that overflows it.
     last_length: f64,
+    /// The active edit tool (`PianoRollTool`'s own doc comment covers what
+    /// each one does).
+    tool: PianoRollTool,
+    /// Note ids the Marquee tool (or a Draw-tool click) has selected.
+    /// Driving two things: which notes a group-move drags together
+    /// (`DragMode::Moving`'s `initial_positions`), and which notes
+    /// Delete/Backspace removes (`delete_selected_or_clear`) — with
+    /// nothing selected, that clears every note of the open channel
+    /// instead, matching the original's own "Delete with nothing selected"
+    /// behavior.
+    selected: HashSet<u32>,
+    /// Whether the Note Properties panel (`render_note_properties`) is
+    /// shown. Minimal compared to the original's panel (velocity only —
+    /// the only per-note property this rewrite's `Note` actually has;
+    /// pan/release/modX/modY/finePitch/color/slide are all declined, see
+    /// this module's own top doc comment), but still toggled the same way.
+    show_note_props: bool,
+    /// What a freshly placed note's velocity is, and what the properties
+    /// panel edits when nothing is selected — Allodium-tauri's own
+    /// `noteDefaults.props.velocity`.
+    default_velocity: f64,
+    /// Click-drag state for the properties panel's velocity dial, same
+    /// vertical-drag-to-value convention as every other `dial` in this
+    /// app (`widgets::dial`'s own doc comment).
+    velocity_drag: Option<VelocityDrag>,
     dying: Vec<DyingNote>,
     /// The grid canvas's own on-screen origin, captured from its `canvas`
     /// paint closure each frame. Plain `div()`s don't hand their own
@@ -185,6 +277,11 @@ impl PianoRoll {
             drag: DragMode::None,
             hover: Hover::None,
             last_length: DEFAULT_NOTE_LEN,
+            tool: PianoRollTool::Draw,
+            selected: HashSet::new(),
+            show_note_props: false,
+            default_velocity: DEFAULT_VELOCITY,
+            velocity_drag: None,
             dying: Vec::new(),
             grid_origin: Rc::new(Cell::new(point(px(0.0), px(0.0)))),
             grid_size: Rc::new(Cell::new(size(px(0.0), px(0.0)))),
@@ -202,6 +299,11 @@ impl PianoRoll {
         if selected != self.loaded_channel_id {
             self.loaded_channel_id = selected;
             self.notes = selected.map(|id| rack.notes_for(id)).unwrap_or_default();
+            // Note ids are only unique within a channel's own content, so
+            // a selection built against the previous channel could
+            // otherwise land on an unrelated note that happens to share
+            // the same id in the newly loaded one.
+            self.selected.clear();
         }
     }
 
@@ -264,62 +366,163 @@ impl PianoRoll {
         }
     }
 
+    /// Starts a box-select drag. `additive` (Shift held at mousedown) keeps
+    /// whatever was already selected as the floor every subsequent move
+    /// unions new overlaps onto; otherwise it starts from empty — matching
+    /// "Shift held *at mousedown* means add to selection", the same
+    /// convention `select_row`'s ctrl/shift-click range selection elsewhere
+    /// in this app uses for *when* a modifier is read.
+    fn begin_marquee(&mut self, step: f64, pitch: i32, additive: bool) {
+        let base_selection = if additive { self.selected.clone() } else { HashSet::new() };
+        self.drag = DragMode::Marquee { anchor_step: step, anchor_pitch: pitch, cur_step: step, cur_pitch: pitch, base_selection };
+        self.update_marquee_selection(step, pitch);
+    }
+
+    /// Recomputes `self.selected` as the marquee's `base_selection` unioned
+    /// with every note overlapping the box from the drag's anchor to
+    /// `(cur_step, cur_pitch)` — called on every mouse move while
+    /// `DragMode::Marquee` is active, and once immediately at mousedown
+    /// (anchor == cur), so a click-without-dragging still selects whatever
+    /// single note sits under the cursor, matching the original's own
+    /// "a click without dragging selects the note under the cursor."
+    fn update_marquee_selection(&mut self, cur_step: f64, cur_pitch: i32) {
+        let (anchor_step, anchor_pitch, base_selection) = match &mut self.drag {
+            DragMode::Marquee { anchor_step, anchor_pitch, cur_step: cs, cur_pitch: cp, base_selection } => {
+                *cs = cur_step;
+                *cp = cur_pitch;
+                (*anchor_step, *anchor_pitch, base_selection.clone())
+            }
+            _ => return,
+        };
+        let (lo_step, hi_step) = (anchor_step.min(cur_step), anchor_step.max(cur_step));
+        let (lo_pitch, hi_pitch) = (anchor_pitch.min(cur_pitch), anchor_pitch.max(cur_pitch));
+        let mut selected = base_selection;
+        for note in &self.notes {
+            let overlaps_step = note.start <= hi_step && note.start + note.length > lo_step;
+            let overlaps_pitch = note.pitch >= lo_pitch && note.pitch <= hi_pitch;
+            if overlaps_step && overlaps_pitch {
+                selected.insert(note.id);
+            }
+        }
+        self.selected = selected;
+    }
+
     fn handle_mouse_down(&mut self, ev: &MouseDownEvent, cx: &mut Context<Self>) {
         let Some(channel_id) = self.loaded_channel_id else { return };
         let (step, pitch, hit, on_resize_edge) = self.hit_test(ev.position);
 
+        // Ctrl+drag is always a marquee, on a note or empty space, in
+        // every tool — the one gesture that isn't gated on `self.tool`.
+        if ev.modifiers.control && ev.button == MouseButton::Left {
+            self.begin_marquee(step, pitch, ev.modifiers.shift);
+            cx.notify();
+            return;
+        }
+
         match ev.button {
+            // The right button deletes in every tool, regardless of `self.tool`.
             MouseButton::Right => {
                 self.drag = DragMode::Deleting;
                 self.delete_at(step, pitch);
+                self.commit_live(channel_id, cx);
             }
-            MouseButton::Left => {
-                // Clicking past the pattern's own end is a no-op,
-                // mirroring `NoteGrid.svelte`'s `drawMousedown` early
-                // return (`stepSnapped >= patternLength`); without it, a
-                // click past the last step could place or drag a note no
-                // scheduler position will ever reach.
-                if step >= self.pattern_length_steps as f64 {
-                    return;
+            MouseButton::Left => match self.tool {
+                PianoRollTool::Delete => {
+                    self.drag = DragMode::Deleting;
+                    self.delete_at(step, pitch);
+                    self.commit_live(channel_id, cx);
                 }
-                match hit {
-                    Some(idx) if on_resize_edge => {
-                        let note = &self.notes[idx];
-                        self.drag = DragMode::Resizing { note_id: note.id, anchor_step: step, orig_length: note.length };
-                    }
-                    Some(idx) => {
-                        let note = &self.notes[idx];
-                        self.drag = DragMode::Moving {
-                            note_id: note.id,
-                            grab_offset_steps: step - note.start,
-                            grab_offset_pitch: pitch - note.pitch,
-                        };
-                    }
-                    None => {
-                        let max_len = (self.pattern_length_steps as f64 - step).max(1.0);
-                        let length = self.last_length.min(max_len);
-                        let note = Note { id: next_note_id(&self.notes), pitch, start: step, length, velocity: DEFAULT_VELOCITY };
-                        let note_id = note.id;
-                        self.notes.push(note);
-                        self.drag = DragMode::Moving { note_id, grab_offset_steps: 0.0, grab_offset_pitch: 0 };
-                    }
+                PianoRollTool::Marquee => {
+                    self.begin_marquee(step, pitch, ev.modifiers.shift);
+                    cx.notify();
                 }
-            }
-            _ => return,
+                PianoRollTool::Draw => {
+                    // Clicking past the pattern's own end is a no-op,
+                    // mirroring `NoteGrid.svelte`'s `drawMousedown` early
+                    // return (`stepSnapped >= patternLength`); without it, a
+                    // click past the last step could place or drag a note no
+                    // scheduler position will ever reach.
+                    if step >= self.pattern_length_steps as f64 {
+                        return;
+                    }
+                    match hit {
+                        Some(idx) if on_resize_edge => {
+                            let note = &self.notes[idx];
+                            self.drag = DragMode::Resizing { note_id: note.id, anchor_step: step, orig_length: note.length };
+                        }
+                        Some(idx) => {
+                            let note_id = self.notes[idx].id;
+                            if ev.modifiers.shift {
+                                self.selected.insert(note_id);
+                            } else if !self.selected.contains(&note_id) || self.selected.len() <= 1 {
+                                self.selected = std::iter::once(note_id).collect();
+                            }
+                            // else: `note_id` is already part of a larger
+                            // selection and Shift isn't held — keep it as-is
+                            // so the drag below moves the whole group.
+                            let note = &self.notes[idx];
+                            let (anchor_initial_start, anchor_initial_pitch) = (note.start, note.pitch);
+                            let grab_offset_steps = step - note.start;
+                            let grab_offset_pitch = pitch - note.pitch;
+                            let initial_positions: Vec<(u32, f64, i32)> =
+                                self.notes.iter().filter(|n| self.selected.contains(&n.id)).map(|n| (n.id, n.start, n.pitch)).collect();
+                            self.drag = DragMode::Moving {
+                                anchor_note_id: note_id,
+                                grab_offset_steps,
+                                grab_offset_pitch,
+                                anchor_initial_start,
+                                anchor_initial_pitch,
+                                initial_positions,
+                            };
+                        }
+                        None => {
+                            // Draw tool, empty space: clears the selection
+                            // and places a fresh note at `last_length`,
+                            // immediately selected and ready to drag.
+                            let max_len = (self.pattern_length_steps as f64 - step).max(1.0);
+                            let length = self.last_length.min(max_len);
+                            let note = Note { id: next_note_id(&self.notes), pitch, start: step, length, velocity: self.default_velocity };
+                            let note_id = note.id;
+                            self.notes.push(note);
+                            self.selected = std::iter::once(note_id).collect();
+                            self.drag = DragMode::Moving {
+                                anchor_note_id: note_id,
+                                grab_offset_steps: 0.0,
+                                grab_offset_pitch: 0,
+                                anchor_initial_start: step,
+                                anchor_initial_pitch: pitch,
+                                initial_positions: vec![(note_id, step, pitch)],
+                            };
+                        }
+                    }
+                    self.commit_live(channel_id, cx);
+                }
+            },
+            _ => {}
         }
-        self.commit_live(channel_id, cx);
     }
 
     fn handle_mouse_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
         let Some(channel_id) = self.loaded_channel_id else { return };
         let (step, pitch) = self.pointer_to_grid(ev.position);
 
-        match self.drag {
-            DragMode::Moving { note_id, grab_offset_steps, grab_offset_pitch } => {
-                if let Some(note) = self.notes.iter_mut().find(|n| n.id == note_id) {
-                    let max_start = (self.pattern_length_steps as f64 - note.length).max(0.0);
-                    note.start = (step - grab_offset_steps).clamp(0.0, max_start);
-                    note.pitch = (pitch - grab_offset_pitch).clamp(0, 127);
+        match self.drag.clone() {
+            DragMode::Moving { grab_offset_steps, grab_offset_pitch, anchor_initial_start, anchor_initial_pitch, initial_positions, .. } => {
+                // Every moving note (the whole selection, for a group
+                // drag) carries the anchor's total displacement since
+                // mousedown, applied to *that note's own* starting
+                // position — not accumulated per-frame deltas — so the
+                // group's relative shape never drifts.
+                let new_anchor_start = step - grab_offset_steps;
+                let new_anchor_pitch = pitch - grab_offset_pitch;
+                let delta_step = new_anchor_start - anchor_initial_start;
+                let delta_pitch = new_anchor_pitch - anchor_initial_pitch;
+                for (note_id, orig_start, orig_pitch) in initial_positions {
+                    if let Some(note) = self.notes.iter_mut().find(|n| n.id == note_id) {
+                        let max_start = (self.pattern_length_steps as f64 - note.length).max(0.0);
+                        note.start = (orig_start + delta_step).clamp(0.0, max_start);
+                        note.pitch = (orig_pitch + delta_pitch).clamp(0, 127);
+                    }
                 }
                 self.commit_live(channel_id, cx);
             }
@@ -334,6 +537,10 @@ impl PianoRoll {
                 self.delete_at(step, pitch);
                 self.commit_live(channel_id, cx);
             }
+            DragMode::Marquee { .. } => {
+                self.update_marquee_selection(step, pitch);
+                cx.notify();
+            }
             DragMode::None => {}
         }
     }
@@ -342,8 +549,8 @@ impl PianoRoll {
         if self.drag == DragMode::None {
             return;
         }
-        if let DragMode::Moving { note_id, .. } | DragMode::Resizing { note_id, .. } = self.drag {
-            if let Some(note) = self.notes.iter().find(|n| n.id == note_id) {
+        if let DragMode::Moving { anchor_note_id, .. } | DragMode::Resizing { note_id: anchor_note_id, .. } = &self.drag {
+            if let Some(note) = self.notes.iter().find(|n| n.id == *anchor_note_id) {
                 self.last_length = note.length;
             }
         }
@@ -354,8 +561,46 @@ impl PianoRoll {
     fn delete_at(&mut self, step: f64, pitch: i32) {
         if let Some(idx) = self.note_at(step, pitch) {
             let note = self.notes.remove(idx);
+            self.selected.remove(&note.id);
             self.dying.push(DyingNote { note, died_at: Instant::now() });
         }
+    }
+
+    /// Delete/Backspace (routed in from `AppShell`'s own key dispatcher,
+    /// `shell.rs`, while this panel is open and frontmost): removes every
+    /// selected note, or — with nothing selected — every note of the open
+    /// channel in the current pattern, matching the original's own
+    /// "Delete with nothing selected clears every note" behavior.
+    pub(crate) fn delete_selected_or_clear(&mut self, cx: &mut Context<Self>) {
+        let Some(channel_id) = self.loaded_channel_id else { return };
+        let now = Instant::now();
+        if self.selected.is_empty() {
+            for note in self.notes.drain(..) {
+                self.dying.push(DyingNote { note, died_at: now });
+            }
+        } else {
+            let selected = std::mem::take(&mut self.selected);
+            let mut i = 0;
+            while i < self.notes.len() {
+                if selected.contains(&self.notes[i].id) {
+                    let note = self.notes.remove(i);
+                    self.dying.push(DyingNote { note, died_at: now });
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        self.commit_live(channel_id, cx);
+        cx.notify();
+    }
+
+    /// Escape (also routed in from `AppShell`): clears the selection.
+    pub(crate) fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selected.is_empty() {
+            return;
+        }
+        self.selected.clear();
+        cx.notify();
     }
 
     fn prune_dying(&mut self) {
@@ -418,6 +663,183 @@ impl PianoRoll {
                 }),
             )
     }
+
+    /// Allodium-tauri's own `PianoRollHeader.svelte`: Draw/Delete/Marquee
+    /// tool buttons, a Play toggle (solos and plays just the open channel —
+    /// `toggle_solo_play`'s own doc comment), and the Note Properties
+    /// toggle. The original bundles this with the window's own title/
+    /// maximize/close chrome in one `.pr-header`; here that chrome already
+    /// comes from `floating_panel.rs` generically for every panel, so this
+    /// is just its left-hand controls as their own row.
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_playing = self.channel_rack.read(cx).is_playing();
+
+        div()
+            .h(px(28.0))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .bg(theme::HEADER_BG)
+            .border_b_1()
+            .border_color(theme::BORDER)
+            .child(icon_toggle(
+                "pr-tool-draw",
+                IconName::Pencil,
+                self.tool == PianoRollTool::Draw,
+                theme::accent(),
+                26.0,
+                26.0,
+                cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                    this.tool = PianoRollTool::Draw;
+                    cx.notify();
+                }),
+            ))
+            .child(icon_toggle(
+                "pr-tool-delete",
+                IconName::Eraser,
+                self.tool == PianoRollTool::Delete,
+                theme::accent(),
+                26.0,
+                26.0,
+                cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                    this.tool = PianoRollTool::Delete;
+                    cx.notify();
+                }),
+            ))
+            .child(icon_toggle(
+                "pr-tool-marquee",
+                IconName::SquareDashedMousePointer,
+                self.tool == PianoRollTool::Marquee,
+                theme::accent(),
+                26.0,
+                26.0,
+                cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                    this.tool = PianoRollTool::Marquee;
+                    cx.notify();
+                }),
+            ))
+            .child(div().w(px(1.0)).h(px(16.0)).bg(theme::BORDER))
+            .child(icon_toggle(
+                "pr-play",
+                if is_playing { IconName::Pause } else { IconName::Play },
+                is_playing,
+                theme::accent(),
+                26.0,
+                26.0,
+                cx.listener(|this, _: &gpui::ClickEvent, _, cx| this.toggle_solo_play(cx)),
+            ))
+            .child(icon_toggle(
+                "pr-note-props",
+                IconName::SlidersHorizontal,
+                self.show_note_props,
+                theme::accent(),
+                26.0,
+                26.0,
+                cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                    this.show_note_props = !this.show_note_props;
+                    cx.notify();
+                }),
+            ))
+    }
+
+    /// The Piano Roll's own Play button: solos the open channel for the
+    /// duration of playback (`ChannelRack::solo_only`/`restore_solo`)
+    /// rather than toggling solo via the row's own mute dot — Allodium-
+    /// tauri's `PianoRollHeader.svelte` setting `playback.soloChannelId`
+    /// before starting and pressing it again just stops. A no-op with no
+    /// channel open.
+    fn toggle_solo_play(&mut self, cx: &mut Context<Self>) {
+        let Some(channel_id) = self.loaded_channel_id else { return };
+        let is_playing = self.channel_rack.read(cx).is_playing();
+        self.channel_rack.update(cx, |rack, cx| {
+            if is_playing {
+                rack.toggle_play(cx);
+                rack.restore_solo(cx);
+            } else {
+                rack.solo_only(channel_id, cx);
+                rack.toggle_play(cx);
+            }
+        });
+    }
+
+    /// Minimal Note Properties panel: velocity only (the sole per-note
+    /// property this rewrite's `Note` has — see this module's own top doc
+    /// comment on declined fidelity). Edits every selected note at once
+    /// when there's a selection; otherwise edits `default_velocity`, what
+    /// a freshly placed note gets next, matching the original's own
+    /// "otherwise `noteDefaults`" fallback. Mixed-value display (the
+    /// original's dimmed "MIXED" label when selected notes disagree) is
+    /// skipped — this just shows the first selected note's value.
+    fn render_note_properties(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected_velocity = self.selected.iter().next().and_then(|id| self.notes.iter().find(|n| n.id == *id)).map(|n| n.velocity);
+        let value = selected_velocity.unwrap_or(self.default_velocity);
+        let label = if self.selected.is_empty() { "Velocity (new notes)".to_string() } else { format!("Velocity ({} note{})", self.selected.len(), if self.selected.len() == 1 { "" } else { "s" }) };
+        let this_entity = cx.entity();
+
+        div()
+            .h(px(28.0))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .bg(theme::HEADER_BG)
+            .border_b_1()
+            .border_color(theme::BORDER)
+            .child(div().text_size(px(10.0)).text_color(theme::accent_dim()).child(label))
+            .child(crate::widgets::dial(
+                "pr-velocity",
+                "Velocity",
+                format!("{:.0}%", value * 100.0),
+                value,
+                1.0,
+                210.0,
+                300.0,
+                20.0,
+                cx.listener(|this, ev: &MouseDownEvent, _, _| this.begin_velocity_drag(f32::from(ev.position.y))),
+                {
+                    let entity = this_entity.clone();
+                    move |_: &mut Window, cx: &mut gpui::App| entity.update(cx, |pr, cx| pr.set_velocity(1.0, cx))
+                },
+                cx.listener(|_this, _ev: &(bool, &'static str, String), _, _| {}),
+            ))
+    }
+
+    fn begin_velocity_drag(&mut self, start_mouse_y: f32) {
+        self.velocity_drag = Some(VelocityDrag { start_mouse_y, start_value: self.selected.iter().next().and_then(|id| self.notes.iter().find(|n| n.id == *id)).map(|n| n.velocity).unwrap_or(self.default_velocity) });
+    }
+
+    fn update_velocity_drag(&mut self, mouse_y: f32, cx: &mut Context<Self>) {
+        let Some(drag) = self.velocity_drag else { return };
+        const VELOCITY_DRAG_SENSITIVITY: f32 = 150.0;
+        let dy = drag.start_mouse_y - mouse_y;
+        let value = (drag.start_value + (dy / VELOCITY_DRAG_SENSITIVITY) as f64).clamp(0.0, 1.0);
+        self.set_velocity(value, cx);
+    }
+
+    fn end_velocity_drag(&mut self) {
+        self.velocity_drag = None;
+    }
+
+    /// Writes `value` to every selected note's velocity, or
+    /// `default_velocity` (what the *next* placed note gets) with nothing
+    /// selected — the properties panel's own dial drives this, same split
+    /// as the original's "edits the selected notes when there are any,
+    /// otherwise `noteDefaults`."
+    fn set_velocity(&mut self, value: f64, cx: &mut Context<Self>) {
+        if self.selected.is_empty() {
+            self.default_velocity = value;
+            cx.notify();
+            return;
+        }
+        for note in self.notes.iter_mut().filter(|n| self.selected.contains(&n.id)) {
+            note.velocity = value;
+        }
+        let Some(channel_id) = self.loaded_channel_id else { return };
+        self.commit_live(channel_id, cx);
+    }
 }
 
 impl Render for PianoRoll {
@@ -445,6 +867,7 @@ impl Render for PianoRoll {
             .collect();
 
         let notes = self.notes.clone();
+        let selected = self.selected.clone();
         let dying: Vec<(Note, f32)> = self
             .dying
             .iter()
@@ -455,12 +878,31 @@ impl Render for PianoRoll {
         let grid_origin = self.grid_origin.clone();
         let grid_size = self.grid_size.clone();
 
+        // The marquee box itself, in grid-content pixels (scroll already
+        // subtracted) — drawn as a plain absolute-positioned overlay
+        // rather than through `paint_grid`'s canvas, since it's simple
+        // enough not to need virtualization and this avoids threading yet
+        // another parameter through that closure.
+        let marquee_rect = if let DragMode::Marquee { anchor_step, anchor_pitch, cur_step, cur_pitch, .. } = &self.drag {
+            let (anchor_step, anchor_pitch, cur_step, cur_pitch) = (*anchor_step, *anchor_pitch, *cur_step, *cur_pitch);
+            let (lo_step, hi_step) = (anchor_step.min(cur_step), anchor_step.max(cur_step));
+            let (lo_pitch, hi_pitch) = (anchor_pitch.min(cur_pitch), anchor_pitch.max(cur_pitch));
+            let x = step_to_x(lo_step) - scroll_x;
+            let w = (step_to_x(hi_step + 1.0) - step_to_x(lo_step)).max(1.0);
+            let y = pitch_to_y(hi_pitch) - scroll_y;
+            let h = (pitch_to_y(lo_pitch) + KEY_H - pitch_to_y(hi_pitch)).max(1.0);
+            Some((x, y, w, h))
+        } else {
+            None
+        };
+
         // Cursor affordance: an active drag wins outright; otherwise it
         // reflects the idle hover classification `handle_mouse_move`'s
         // passive branch below keeps up to date. This is what makes the
         // resize zone this stage adds actually discoverable rather than
         // a hitbox nobody would find by accident.
-        let grid_area = div()
+        let mut grid_area = div()
+            .relative()
             .size_full()
             .child(
                 canvas(
@@ -468,11 +910,25 @@ impl Render for PianoRoll {
                     move |bounds, _, window, _| {
                         grid_origin.set(bounds.origin);
                         grid_size.set(bounds.size);
-                        paint_grid(window, bounds, scroll_x, scroll_y, &notes, &background_notes, &dying, current_step);
+                        paint_grid(window, bounds, scroll_x, scroll_y, &notes, &selected, &background_notes, &dying, current_step);
                     },
                 )
                 .size_full(),
-            )
+            );
+        if let Some((x, y, w, h)) = marquee_rect {
+            grid_area = grid_area.child(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .w(px(w))
+                    .h(px(h))
+                    .border_1()
+                    .border_color(theme::accent())
+                    .bg(theme::accent().alpha(0.12)),
+            );
+        }
+        let grid_area = grid_area
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.handle_mouse_down(ev, cx)))
             .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.handle_mouse_down(ev, cx)))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
@@ -516,10 +972,11 @@ impl Render for PianoRoll {
                     cx.notify();
                 }),
             );
-        let grid_area = match self.drag {
+        let grid_area = match &self.drag {
             DragMode::Moving { .. } => grid_area.cursor_grabbing(),
             DragMode::Resizing { .. } => grid_area.cursor_col_resize(),
             DragMode::Deleting => grid_area.cursor_not_allowed(),
+            DragMode::Marquee { .. } => grid_area.cursor_crosshair(),
             DragMode::None => match self.hover {
                 Hover::Move => grid_area.cursor_grab(),
                 Hover::Resize => grid_area.cursor_col_resize(),
@@ -532,7 +989,22 @@ impl Render for PianoRoll {
             .flex()
             .flex_col()
             .bg(theme::BG_APP)
+            // The velocity dial's own drag (`render_note_properties`)
+            // tracks here rather than on the small dial itself, same
+            // reason every other dial-driving container in this app
+            // (e.g. `ChannelRack`'s own root div) does it at this level:
+            // a drag has to keep updating even once the cursor leaves the
+            // dial's own tiny hitbox.
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if this.velocity_drag.is_some() {
+                    this.update_velocity_drag(f32::from(ev.position.y), cx);
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_velocity_drag()))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_velocity_drag()))
+            .child(self.render_toolbar(cx))
             .child(self.render_channel_picker(cx))
+            .when(self.show_note_props, |d| d.child(self.render_note_properties(cx)))
             .child(
                 div()
                     .relative()
@@ -648,6 +1120,7 @@ fn paint_grid(
     scroll_x: f32,
     scroll_y: f32,
     notes: &[Note],
+    selected: &HashSet<u32>,
     background_notes: &[Note],
     dying: &[(Note, f32)],
     current_step: f64,
@@ -720,7 +1193,11 @@ fn paint_grid(
         paint_note(window, origin, scroll_x, scroll_y, note, ghost_color, 1.0);
     }
 
-    let note_color = theme::accent();
+    // While a selection exists, selected notes draw brighter and everything
+    // else dims — the original's own "every unselected note dims to 40%
+    // while a selection exists," minus the white-rim/glow/stripe treatment
+    // (no diagonal-stripe drawing primitive here, see this module's own
+    // top doc comment on declined fidelity).
     for note in notes {
         if note.start + note.length <= visible_start || note.start > visible_end {
             continue;
@@ -728,6 +1205,13 @@ fn paint_grid(
         if note.pitch < first_visible_pitch - 1 || note.pitch > last_visible_pitch + 1 {
             continue;
         }
+        let note_color = if selected.is_empty() {
+            theme::accent()
+        } else if selected.contains(&note.id) {
+            theme::accent_hover()
+        } else {
+            theme::accent().alpha(0.4)
+        };
         paint_note(window, origin, scroll_x, scroll_y, note, note_color, 1.0);
     }
 

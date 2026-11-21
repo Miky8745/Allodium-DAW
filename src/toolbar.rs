@@ -543,14 +543,24 @@ impl AppShell {
     /// `onKeydown` exactly, so Ctrl+Z/C/V and ordinary typing still work
     /// while the toggle is on.
     pub(crate) fn on_qwerty_key_down(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let m = &event.keystroke.modifiers;
+        let key = event.keystroke.key.as_str();
+        // Delete/Backspace/Escape act on the Piano Roll's own note
+        // selection whenever it's open and frontmost — independent of the
+        // "Typing keyboard to piano" toggle below, same as the original's
+        // own Piano Roll shortcuts aren't gated on QWERTY-piano mode
+        // either. `route_piano_roll_key` is the no-op/false case (panel
+        // closed, not frontmost, or a different key) that falls through
+        // to the rest of this handler unchanged.
+        if !m.control && !m.alt && !m.platform && !window.has_focused_input(cx) && self.route_piano_roll_key(key, cx) {
+            return;
+        }
         if !self.toolbar.typing_keyboard {
             return;
         }
-        let m = &event.keystroke.modifiers;
         if m.control || m.alt || m.platform || window.has_focused_input(cx) {
             return;
         }
-        let key = event.keystroke.key.as_str();
         if key == "," || key == "." {
             if !event.is_held {
                 self.toolbar.typing_keyboard_octave = (self.toolbar.typing_keyboard_octave + if key == "," { -1 } else { 1 }).clamp(-5, 4);

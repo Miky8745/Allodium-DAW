@@ -245,6 +245,39 @@ impl ChannelRack {
         cx.notify();
     }
 
+    /// Forces `channel_id` to be the only soloed channel, remembering
+    /// whatever solo set was active beforehand (same `pre_solo_state`
+    /// mechanism `toggle_solo` uses) — used by the Piano Roll's own Play
+    /// button (`piano_roll.rs`'s `toggle_solo_play`), which solos the open
+    /// channel for the duration of playback rather than toggling solo via
+    /// this row's own mute dot. A no-op if `channel_id` is already the
+    /// sole soloed channel.
+    pub fn solo_only(&mut self, channel_id: u32, cx: &mut Context<Self>) {
+        let already_only = self.project.channels.items.iter().all(|c| c.soloed == (c.id == channel_id));
+        if already_only {
+            return;
+        }
+        self.pre_solo_state = Some(self.project.channels.items.iter().filter(|c| c.soloed).map(|c| c.id).collect());
+        for ch in &mut self.project.channels.items {
+            ch.soloed = ch.id == channel_id;
+        }
+        self.push_snapshot();
+        self.save();
+        cx.notify();
+    }
+
+    /// Undoes `solo_only`: restores whatever solo set was active right
+    /// before it, or clears solo entirely if there was nothing to restore.
+    pub fn restore_solo(&mut self, cx: &mut Context<Self>) {
+        let restore = self.pre_solo_state.take().unwrap_or_default();
+        for ch in &mut self.project.channels.items {
+            ch.soloed = restore.contains(&ch.id);
+        }
+        self.push_snapshot();
+        self.save();
+        cx.notify();
+    }
+
     /// The row `.sel-btn` toggle's ctrl/shift-click range selection —
     /// ports `ChannelRack.svelte`'s `handleSelect` verbatim.
     fn select_row(&mut self, idx: usize, channel_id: u32, modifiers: gpui::Modifiers, cx: &mut Context<Self>) {

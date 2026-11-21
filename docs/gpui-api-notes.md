@@ -117,6 +117,20 @@ the DAW's scheduler needs to do.
   and cleared by a window/panel-level `on_mouse_up`/`on_mouse_up_out`,
   and gate the per-cell `on_mouse_move` handler on that state instead of
   on `pressed_button` alone.
+- **This app funnels all keyboard handling through one `FocusHandle` +
+  one `on_key_down` at `AppShell`'s own root** (`shell.rs`'s
+  `focus_handle` + `.track_focus(&self.focus_handle).on_key_down(cx.
+  listener(Self::on_qwerty_key_down))`), not a `FocusHandle` per panel.
+  A panel that needs its own keyboard shortcuts (e.g. the Piano Roll's
+  Delete/Backspace/Escape acting on a note selection) should add a
+  routing check inside that one existing dispatcher — gated on whatever
+  makes that panel "active" right now (open + frontmost, in the Piano
+  Roll's case, via `AppShell::route_piano_roll_key`) — rather than
+  giving the panel's own entity a second `FocusHandle`/`track_focus`.
+  Two competing focus handles would fight over which one actually has
+  focus, and clicking into the second panel would silently break
+  whatever the first handle's own shortcuts were (here, QWERTY-typing-
+  to-piano) the next time that panel is interacted with.
 
 ## Performance lessons
 

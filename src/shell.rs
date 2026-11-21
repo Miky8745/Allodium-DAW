@@ -265,6 +265,26 @@ impl AppShell {
         cx.notify();
     }
 
+    /// Delete/Backspace/Escape, routed in from `AppShell::on_qwerty_key_down`
+    /// (`toolbar.rs`) ahead of its own QWERTY-typing-to-piano handling —
+    /// the Piano Roll's own keyboard shortcuts for acting on a note
+    /// selection (`PianoRoll::delete_selected_or_clear`/`clear_selection`).
+    /// Returns whether it actually handled the key, so the caller knows
+    /// whether to fall through to its own handling instead.
+    pub(crate) fn route_piano_roll_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        if !matches!(key, "delete" | "backspace" | "escape") {
+            return false;
+        }
+        if !self.geometry.get(PanelKind::PianoRoll).open || !self.is_frontmost(PanelKind::PianoRoll) {
+            return false;
+        }
+        match key {
+            "delete" | "backspace" => self.piano_roll.update(cx, |pr, cx| pr.delete_selected_or_clear(cx)),
+            _ => self.piano_roll.update(cx, |pr, cx| pr.clear_selection(cx)),
+        }
+        true
+    }
+
     fn is_frontmost(&self, kind: PanelKind) -> bool {
         self.z_order.last() == Some(&kind)
     }
