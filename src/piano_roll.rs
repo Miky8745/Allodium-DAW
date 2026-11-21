@@ -64,9 +64,21 @@
 //!   (the original's dimmed "MIXED" label when selected notes disagree)
 //!   is skipped — the panel just shows the first selected note's value
 //!   per control.
+//! - **Added** (yet another later pass, at the user's explicit request):
+//!   the Playlist's own numbered ruler (`render_beat_ruler` — bars, same
+//!   as the Playlist's own numbering, on top of this grid's existing
+//!   per-beat light/dark banding rather than replacing it), a draggable
+//!   horizontal scrollbar (`render_h_scrollbar`/`HScrollGeometry`,
+//!   hand-built since the grid's content is painted procedurally in a
+//!   `canvas` rather than laid out as real DOM `ScrollHandle` could
+//!   track), and the overview/minimap strip from the list below
+//!   (`render_overview`) — now implemented after all, sharing its
+//!   viewport-window geometry with the scrollbar via `HScrollGeometry`
+//!   rather than being a declined stretch item; see the next bullet for
+//!   what's still actually out.
 //! - **Declined, matching `02-feature-scope.md`'s own stretch list**:
-//!   zoom, copy/paste, the velocity lane, the overview/minimap strip,
-//!   and per-channel independent-loop playhead wrapping. Also declined:
+//!   zoom, copy/paste, the velocity lane, and per-channel independent-
+//!   loop playhead wrapping. Also declined:
 //!   pitched audio preview on place/move (the original's `audioEngine.
 //!   previewNote`) — unaffected by the note-properties audio work above,
 //!   since preview voices (`AudioEngine::preview`) never go through
@@ -140,7 +152,14 @@ fn x_to_step(x: f32) -> f64 {
 /// pattern.
 fn h_scrollbar_thumb_width(viewport_w: f32, content_w: f32) -> f32 {
     const MIN_THUMB_W: f32 = 24.0;
-    (viewport_w / content_w.max(1.0) * viewport_w).clamp(MIN_THUMB_W, viewport_w)
+    // `viewport_w` starts at `0.0` before the grid's first paint
+    // (`grid_size`'s own doc comment) and can legitimately be narrower
+    // than `MIN_THUMB_W` in a small window — `.clamp(MIN_THUMB_W,
+    // viewport_w)` panics the instant `viewport_w < MIN_THUMB_W` (min >
+    // max), so clamp the upper bound to never go below the lower one
+    // instead of assuming the panel is always wide enough.
+    let max = viewport_w.max(MIN_THUMB_W);
+    (viewport_w / content_w.max(1.0) * viewport_w).clamp(MIN_THUMB_W, max)
 }
 
 fn is_black_key(pitch: i32) -> bool {
@@ -396,6 +415,19 @@ struct ParamDrag {
 struct HScrollDrag {
     start_mouse_x: f32,
     start_scroll_x: f32,
+}
+
+/// The shared "where is the viewport within the content, in pixels"
+/// facts both `render_h_scrollbar` and `render_overview` draw from —
+/// `PianoRoll::h_scroll_geometry`'s own doc comment.
+#[derive(Clone, Copy)]
+struct HScrollGeometry {
+    viewport_w: f32,
+    content_w: f32,
+    max_scroll: f32,
+    thumb_w: f32,
+    track_free: f32,
+    thumb_x: f32,
 }
 
 pub struct PianoRoll {
@@ -1134,6 +1166,22 @@ impl PianoRoll {
         self.param_drag = None;
     }
 
+    /// Everything the horizontal scrollbar (`render_h_scrollbar`) *and*
+    /// the overview strip's viewport window (`render_overview`) need to
+    /// draw/drag themselves — both are really the same "where is the
+    /// current viewport within the content" fact, just drawn in two
+    /// different places, so they share one computation instead of each
+    /// re-deriving it (and risking disagreeing with each other).
+    fn h_scroll_geometry(&self) -> HScrollGeometry {
+        let viewport_w = f32::from(self.grid_size.get().width).max(0.0);
+        let content_w = self.content_width();
+        let max_scroll = (content_w - viewport_w).max(0.0);
+        let thumb_w = h_scrollbar_thumb_width(viewport_w, content_w);
+        let track_free = (viewport_w - thumb_w).max(1.0);
+        let thumb_x = if max_scroll > 0.0 { (self.scroll_x / max_scroll) * track_free } else { 0.0 };
+        HScrollGeometry { viewport_w, content_w, max_scroll, thumb_w, track_free, thumb_x }
+    }
+
     fn begin_h_scroll_drag(&mut self, start_mouse_x: f32) {
         self.h_scroll_drag = Some(HScrollDrag { start_mouse_x, start_scroll_x: self.scroll_x });
     }
@@ -1145,13 +1193,9 @@ impl PianoRoll {
     /// a long pattern.
     fn update_h_scroll_drag(&mut self, mouse_x: f32, cx: &mut Context<Self>) {
         let Some(drag) = self.h_scroll_drag else { return };
-        let viewport_w = f32::from(self.grid_size.get().width);
-        let content_w = self.content_width();
-        let max_scroll = (content_w - viewport_w).max(0.0);
-        let thumb_w = h_scrollbar_thumb_width(viewport_w, content_w);
-        let track_free = (viewport_w - thumb_w).max(1.0);
+        let geo = self.h_scroll_geometry();
         let dx = mouse_x - drag.start_mouse_x;
-        self.scroll_x = (drag.start_scroll_x + dx * (max_scroll / track_free)).clamp(0.0, max_scroll);
+        self.scroll_x = (drag.start_scroll_x + dx * (geo.max_scroll / geo.track_free)).clamp(0.0, geo.max_scroll);
         cx.notify();
     }
 
@@ -1159,17 +1203,90 @@ impl PianoRoll {
         self.h_scroll_drag = None;
     }
 
-    /// Clicking the scrollbar track (not the thumb itself — the thumb's
-    /// own mousedown handler stops propagation before this ever fires)
-    /// jumps so the thumb's center lands under the cursor.
+    /// A minimap of the whole open channel, squeezed to fit the panel's
+    /// own width regardless of how long the pattern actually is (unlike
+    /// the grid itself, which is pixel-accurate at `STEP_W` per step) —
+    /// Allodium-tauri's own `PianoRollOverview.svelte`
+    /// (`<MiniNoteRoll fit="stretch">` + a lighter overlay rectangle for
+    /// the visible fraction), and the same squeeze the Channel Rack's own
+    /// mini piano-roll preview (`channel_rack/row.rs`'s `render_piano_
+    /// preview`) uses for its *pitch* axis already, just applied to the
+    /// *time* axis here too. The bright window rectangle is exactly
+    /// `h_scroll_geometry`'s own thumb — dragging it or clicking the
+    /// strip's background behind it scrolls the grid exactly like the
+    /// horizontal scrollbar below, just with real note content as the
+    /// backdrop instead of a bare track, for VS Code-minimap-style
+    /// at-a-glance navigation in a long pattern.
+    fn render_overview(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        const OVERVIEW_H: f32 = 26.0;
+        const NOTE_H: f32 = 3.0;
+
+        let geo = self.h_scroll_geometry();
+        let pattern_length = self.pattern_length_steps.max(1) as f64;
+
+        let pitch_min = self.notes.iter().map(|n| n.pitch).min().unwrap_or(60);
+        let pitch_max = self.notes.iter().map(|n| n.pitch).max().unwrap_or(60);
+        let span = (pitch_max - pitch_min).max(12) as f32;
+        let mid = (pitch_min + pitch_max) as f32 / 2.0;
+        let lo = mid - span / 2.0;
+
+        let mut strip = div()
+            .id("pr-overview")
+            .relative()
+            .h(px(OVERVIEW_H))
+            .w_full()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .bg(theme::STEP_OFF_GREY)
+            .border_b_1()
+            .border_color(theme::BORDER)
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.jump_h_scroll(f32::from(ev.position.x), cx)),
+            );
+
+        for (note_idx, note) in self.notes.iter().enumerate() {
+            let x = (note.start / pattern_length) as f32 * geo.viewport_w;
+            let w = ((note.length / pattern_length) as f32 * geo.viewport_w).max(1.0);
+            let t = ((note.pitch as f32 - lo) / span).clamp(0.0, 1.0);
+            let y = (1.0 - t) * (OVERVIEW_H - NOTE_H);
+            let color: Hsla = if note.color != 0 { gpui::rgb(note.color).into() } else { theme::accent() };
+            strip = strip.child(
+                div().id(("pr-overview-note", note_idx)).absolute().left(px(x)).top(px(y)).w(px(w)).h(px(NOTE_H)).rounded(theme::RADIUS_XS).bg(color),
+            );
+        }
+
+        strip.child(
+            div()
+                .id("pr-overview-window")
+                .absolute()
+                .left(px(geo.thumb_x))
+                .top_0()
+                .w(px(geo.thumb_w.max(4.0)))
+                .h_full()
+                .border_1()
+                .border_color(theme::accent())
+                .bg(theme::accent().alpha(0.15))
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                        this.begin_h_scroll_drag(f32::from(ev.position.x));
+                        cx.stop_propagation();
+                    }),
+                ),
+        )
+    }
+
+    /// Clicking the scrollbar track or the overview strip's background
+    /// (not the thumb/window itself — those stop propagation before this
+    /// ever fires) jumps so the thumb/window's center lands under the
+    /// cursor.
     fn jump_h_scroll(&mut self, mouse_x: f32, cx: &mut Context<Self>) {
-        let viewport_w = f32::from(self.grid_size.get().width);
-        let content_w = self.content_width();
-        let max_scroll = (content_w - viewport_w).max(0.0);
-        let thumb_w = h_scrollbar_thumb_width(viewport_w, content_w);
-        let track_free = (viewport_w - thumb_w).max(1.0);
-        let target_thumb_x = (mouse_x - thumb_w / 2.0).clamp(0.0, track_free);
-        self.scroll_x = (target_thumb_x / track_free * max_scroll).clamp(0.0, max_scroll);
+        let geo = self.h_scroll_geometry();
+        let target_thumb_x = (mouse_x - geo.thumb_w / 2.0).clamp(0.0, geo.track_free);
+        self.scroll_x = (target_thumb_x / geo.track_free * geo.max_scroll).clamp(0.0, geo.max_scroll);
         self.clamp_scroll(self.grid_size.get());
         cx.notify();
     }
@@ -1235,18 +1352,12 @@ impl PianoRoll {
     /// already fits, same as a native scrollbar would.
     fn render_h_scrollbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         const TRACK_H: f32 = 10.0;
-        let viewport_w = f32::from(self.grid_size.get().width);
-        let content_w = self.content_width();
+        let geo = self.h_scroll_geometry();
 
         let track = div().id("pr-hscroll-track").relative().h(px(TRACK_H)).w_full().flex_shrink_0().bg(theme::HEADER_BG);
-        if content_w <= viewport_w || viewport_w <= 0.0 {
+        if geo.content_w <= geo.viewport_w || geo.viewport_w <= 0.0 {
             return track;
         }
-
-        let thumb_w = h_scrollbar_thumb_width(viewport_w, content_w);
-        let max_scroll = content_w - viewport_w;
-        let track_free = (viewport_w - thumb_w).max(0.0);
-        let thumb_x = if max_scroll > 0.0 { (self.scroll_x / max_scroll) * track_free } else { 0.0 };
 
         track
             .cursor_pointer()
@@ -1258,9 +1369,9 @@ impl PianoRoll {
                 div()
                     .id("pr-hscroll-thumb")
                     .absolute()
-                    .left(px(thumb_x))
+                    .left(px(geo.thumb_x))
                     .top_0()
-                    .w(px(thumb_w))
+                    .w(px(geo.thumb_w))
                     .h(px(TRACK_H))
                     .rounded(theme::RADIUS_XS)
                     .bg(theme::BTN_BORDER)
@@ -1517,6 +1628,7 @@ impl Render for PianoRoll {
                             .flex()
                             .flex_col()
                             .overflow_hidden()
+                            .child(self.render_overview(cx))
                             .child(self.render_beat_ruler(cx))
                             .child(
                                 div()

@@ -131,6 +131,19 @@ the DAW's scheduler needs to do.
   focus, and clicking into the second panel would silently break
   whatever the first handle's own shortcuts were (here, QWERTY-typing-
   to-piano) the next time that panel is interacted with.
+- **`f32`/`f64::clamp(min, max)` panics if `min > max` — never pass a
+  size tracked from layout (a viewport width, a measured element size)
+  as the *upper* bound of a clamp whose lower bound is a fixed minimum.**
+  Real crash hit in practice: a scrollbar/minimap thumb width clamped to
+  `.clamp(MIN_THUMB_W, viewport_w)` panicked the instant `viewport_w`
+  was narrower than `MIN_THUMB_W` — which a tracked viewport size
+  legitimately *is* for the first few frames (it starts at `px(0.0)`
+  before a `canvas`'s paint closure ever reports a real size, same gap
+  `grid_origin`/`grid_size`'s own doc comment calls out), and could also
+  just happen in a genuinely narrow window. Fix: clamp the *bound*
+  itself first (`let max = viewport_w.max(MIN_THUMB_W);`) so the two
+  arguments to `.clamp()` can never cross, rather than assuming the
+  tracked size will always be "big enough."
 
 ## Performance lessons
 
