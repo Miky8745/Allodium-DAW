@@ -527,23 +527,33 @@ impl ChannelRack {
                     }
                 }),
             ))
-            .child(scroll_field(
-                ("route", id as usize),
-                if ch.mixer_track == 0 { "Mstr".to_string() } else { format!("Trk {}", ch.mixer_track) },
-                40.0,
-                cx.listener(move |this, ev: &ScrollEvent, _, cx| {
-                    let dy = f32::from(ev.delta.pixel_delta(px(1.0)).y);
-                    let sign: i32 = if dy > 0.0 { -1 } else if dy < 0.0 { 1 } else { 0 };
-                    this.cycle_channel_route_by(id, sign, cx);
-                }),
-            ))
             .child(
+                // `.relative()` here scopes the click-cycle overlay below to
+                // just this wrapper's bounds — without it, `.absolute()`
+                // escalates to the nearest positioned ancestor, which ended
+                // up being the whole row (steps included), so clicking a
+                // step elsewhere in the row was hitting this overlay and
+                // cycling the mixer route instead of placing a note.
                 div()
-                    .id(("route-click", id as usize))
-                    .absolute() // overlays the scroll_field above for the click-cycle convenience; see cycle_channel_route's own doc comment
-                    .size_full()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.cycle_channel_route(id, cx))),
+                    .relative()
+                    .child(scroll_field(
+                        ("route", id as usize),
+                        if ch.mixer_track == 0 { "Mstr".to_string() } else { format!("Trk {}", ch.mixer_track) },
+                        40.0,
+                        cx.listener(move |this, ev: &ScrollEvent, _, cx| {
+                            let dy = f32::from(ev.delta.pixel_delta(px(1.0)).y);
+                            let sign: i32 = if dy > 0.0 { -1 } else if dy < 0.0 { 1 } else { 0 };
+                            this.cycle_channel_route_by(id, sign, cx);
+                        }),
+                    ))
+                    .child(
+                        div()
+                            .id(("route-click", id as usize))
+                            .absolute() // overlays the scroll_field above for the click-cycle convenience; see cycle_channel_route's own doc comment
+                            .size_full()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.cycle_channel_route(id, cx))),
+                    ),
             )
             .child(sample_box)
             .child(
