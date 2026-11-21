@@ -1,8 +1,8 @@
 //! The rack's bottom bar: add-channel and the Pattern/Song transport
 //! toggle. Allodium-tauri's own footer additionally has a horizontal
-//! scrollbar for the growable step count — not ported here; this
-//! rewrite's row list scrolls both axes together instead (see
-//! `channel_rack.rs`'s own `render`).
+//! scrollbar for the growable step count — this rewrite's own lives just
+//! above the footer instead, as its own thin strip (see
+//! `channel_rack.rs`'s own `render` and `steps_scroll`).
 
 use gpui::assets::IconName;
 use gpui::component::{Icon, Sizable};

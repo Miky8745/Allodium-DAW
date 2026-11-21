@@ -4,7 +4,7 @@
 
 use gpui::component::input::Input;
 use gpui::component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui::component::scroll::ScrollableElement;
+use gpui::component::InteractiveElementExt as _;
 use gpui::{App, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, ParentElement, ScrollEvent, Styled, Window, div, prelude::*, px};
 
 use crate::color_utils::{contrast_text_color, hsl_to_rgb_u32};
@@ -513,13 +513,36 @@ impl ChannelRack {
                         .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| this.select_row(idx, id, ev.modifiers(), cx)))
                 },
             )
-            // `flex_1`/`min_w_0` so the step grid (not the whole row) is
-            // what shrinks and scrolls when a pattern grows past one bar —
-            // the name/dial columns before it keep their own fixed width.
-            // Explicit `.id()`: every row calls this from the same source
-            // line, so the scrollable's own call-site-derived id would
-            // otherwise collide across rows and they'd all share one
-            // scroll position.
-            .child(step_row.flex_1().min_w_0().overflow_x_scrollbar().id(("steps-scroll", id as usize)))
+            // The viewport (this `.flex_1().min_w_0()` div) and its content
+            // (`step_row` itself) have to be two separate elements: putting
+            // both roles on `step_row` made it shrink to fit — and since
+            // its own step buttons default to `flex_shrink: 1`, shrinking
+            // the row squeezed every step narrower instead of clipping and
+            // scrolling past the ones that don't fit. `flex_none()` here
+            // keeps `step_row` at its natural (un-shrunk) width so there's
+            // something for the viewport to actually overflow and scroll.
+            // Every row tracks the *same* shared `steps_scroll` handle
+            // (rather than each getting its own via `overflow_x_scrollbar`)
+            // so scrolling one row's steps moves every row's steps in
+            // lockstep; the one visible scrollbar for this lives in
+            // `footer.rs`, not per row.
+            .child(
+                div()
+                    .id(("steps-scroll", id as usize))
+                    // GPUI's default display is `Block`, not `Flex` — a
+                    // block parent ignores `flex_none`/etc entirely on its
+                    // child (those only mean anything under a flex parent),
+                    // so without this explicit `.flex().flex_row()`,
+                    // `step_row` just stretched to the viewport's own
+                    // (narrow) width like any other block child would.
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.steps_scroll)
+                    .lock_scroll_axis()
+                    .child(step_row.flex_none()),
+            )
     }
 }

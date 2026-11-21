@@ -131,6 +131,12 @@ pub struct ChannelRack {
     /// the Piano Roll's `piano_keys` to glow the matching key rows,
     /// Allodium-tauri's `liveNotes.held` equivalent.
     held_pitches: HashSet<i32>,
+    /// One shared horizontal `ScrollHandle` every row's step grid tracks
+    /// (`row.rs`'s `render_row`) instead of each row owning its own — so
+    /// scrolling any single row's steps moves them all in lockstep, the
+    /// same way the whole rack scrolled together before vertical and
+    /// horizontal scrolling were split onto separate elements.
+    steps_scroll: gpui::ScrollHandle,
 }
 
 impl ChannelRack {
@@ -189,6 +195,7 @@ impl ChannelRack {
             last_step_index: -1,
             last_step_change: std::time::Instant::now(),
             held_pitches: HashSet::new(),
+            steps_scroll: gpui::ScrollHandle::new(),
         };
         rack.push_snapshot();
         rack
@@ -471,10 +478,31 @@ impl Render for ChannelRack {
             // gpui-component's own tested shrink-to-fit recipe — so this
             // drops down to the single-axis variant every other scrollable
             // in this codebase (e.g. `mixer.rs`'s `overflow_x_scrollbar`)
-            // already uses reliably. Each row's own step grid gets its own
-            // horizontal scrollbar instead (`row.rs`'s `render_row`), since
-            // a long pattern can still be wider than the panel.
+            // already uses reliably. Every row's own step grid tracks the
+            // shared `steps_scroll` handle instead of each owning its own
+            // (`row.rs`'s `render_row`), so a long pattern still scrolls
+            // horizontally when wider than the panel — and all rows move
+            // together rather than drifting out of sync.
             .child(rows.overflow_y_scrollbar())
+            .child(
+                div()
+                    .relative()
+                    .h(gpui::px(10.0))
+                    .w_full()
+                    .flex_shrink_0()
+                    .bg(crate::theme::HEADER_BG)
+                    .child(
+                        // `viewport_from_layout()`: without it the
+                        // scrollbar anchors to `scroll_handle`'s own
+                        // tracked viewport bounds — wherever `track_scroll`
+                        // was last called, i.e. one of the per-row step
+                        // viewports — instead of to this strip, so it drew
+                        // on top of the steps instead of down here.
+                        gpui::component::scroll::Scrollbar::new(&self.steps_scroll)
+                            .axis(gpui::component::scroll::ScrollbarAxis::Horizontal)
+                            .viewport_from_layout(),
+                    ),
+            )
             .child(footer)
     }
 }
