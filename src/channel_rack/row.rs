@@ -351,17 +351,33 @@ impl ChannelRack {
                     .when(is_current, |d| d.border_2().border_color(theme::accent_hover()))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::BG_PILL_HOVER))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| this.set_step(id, i, true, true, cx)))
-                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, _: &MouseDownEvent, _, cx| this.set_step(id, i, false, false, cx)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.painting_step = true;
+                        this.set_step(id, i, true, true, cx);
+                    }))
+                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.painting_step = true;
+                        this.set_step(id, i, false, false, cx);
+                    }))
                     // Dragging across steps with a button still held paints
                     // them the same way clicking each one individually
                     // would, so a left/right-drag across the row fills or
                     // erases a run of steps in one motion instead of
-                    // requiring a separate click per step.
-                    .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| match ev.pressed_button {
-                        Some(MouseButton::Left) => this.set_step(id, i, true, false, cx),
-                        Some(MouseButton::Right) => this.set_step(id, i, false, false, cx),
-                        _ => {}
+                    // requiring a separate click per step. Gated on
+                    // `painting_step` (set only by this row's own
+                    // mousedown above), not just `ev.pressed_button` —
+                    // otherwise an unrelated drag that happens to pass the
+                    // pointer over the step grid with a button still held,
+                    // e.g. resizing this panel, would paint steps too.
+                    .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                        if !this.painting_step {
+                            return;
+                        }
+                        match ev.pressed_button {
+                            Some(MouseButton::Left) => this.set_step(id, i, true, false, cx),
+                            Some(MouseButton::Right) => this.set_step(id, i, false, false, cx),
+                            _ => {}
+                        }
                     })),
             );
         }

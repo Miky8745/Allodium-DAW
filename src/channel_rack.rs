@@ -137,6 +137,16 @@ pub struct ChannelRack {
     /// same way the whole rack scrolled together before vertical and
     /// horizontal scrolling were split onto separate elements.
     steps_scroll: gpui::ScrollHandle,
+    /// Set while a step's own mousedown is actively painting a run of
+    /// steps (`row.rs`'s drag-to-paint) and cleared on mouseup anywhere in
+    /// the panel — gates the per-step `on_mouse_move` paint handler so it
+    /// only fires for a drag that actually started on a step. Without it,
+    /// an unrelated drag that happens to pass the pointer over the step
+    /// grid with a button still held — e.g. resizing this very panel —
+    /// would paint steps as a side effect, since a plain `MouseMoveEvent`
+    /// can't otherwise tell "painting steps" apart from "some other drag,
+    /// physically over the steps right now".
+    painting_step: bool,
 }
 
 impl ChannelRack {
@@ -196,6 +206,7 @@ impl ChannelRack {
             last_step_change: std::time::Instant::now(),
             held_pitches: HashSet::new(),
             steps_scroll: gpui::ScrollHandle::new(),
+            painting_step: false,
         };
         rack.push_snapshot();
         rack
@@ -469,8 +480,14 @@ impl Render for ChannelRack {
                     this.update_drag(ev.position, cx);
                 }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| {
+                this.end_drag();
+                this.painting_step = false;
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| {
+                this.end_drag();
+                this.painting_step = false;
+            }))
             .child(header)
             // Vertical-only: `ScrollbarAxis::Both` was silently failing to
             // ever detect vertical overflow here (only the horizontal axis
