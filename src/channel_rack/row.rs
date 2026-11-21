@@ -84,7 +84,12 @@ impl ChannelRack {
     /// backend, so this only ever touches a note matching that exact
     /// shape, never an arbitrary note drawn in the Piano Roll that happens
     /// to start at the same step.
-    fn set_step(&mut self, channel_id: u32, step: usize, active: bool, cx: &mut Context<Self>) {
+    /// `audition` is only ever `true` from the initial mousedown, never
+    /// from the drag-paint `on_mouse_move` that repeats this call for every
+    /// step the pointer crosses while a button stays held — so painting a
+    /// run of steps in one drag plays the sample once, at the start of the
+    /// gesture, rather than once per step it turns on along the way.
+    fn set_step(&mut self, channel_id: u32, step: usize, active: bool, audition: bool, cx: &mut Context<Self>) {
         let entry = self.content_for(channel_id);
         let existing = step_note_index(&entry.notes, step);
         match (active, existing) {
@@ -97,7 +102,7 @@ impl ChannelRack {
             }
             _ => {}
         }
-        if active {
+        if active && audition {
             self.audition(channel_id);
         }
         // Grows the pattern when a step reaches its current last bar, or
@@ -346,16 +351,16 @@ impl ChannelRack {
                     .when(is_current, |d| d.border_2().border_color(theme::accent_hover()))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::BG_PILL_HOVER))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| this.set_step(id, i, true, cx)))
-                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, _: &MouseDownEvent, _, cx| this.set_step(id, i, false, cx)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| this.set_step(id, i, true, true, cx)))
+                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, _: &MouseDownEvent, _, cx| this.set_step(id, i, false, false, cx)))
                     // Dragging across steps with a button still held paints
                     // them the same way clicking each one individually
                     // would, so a left/right-drag across the row fills or
                     // erases a run of steps in one motion instead of
                     // requiring a separate click per step.
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| match ev.pressed_button {
-                        Some(MouseButton::Left) => this.set_step(id, i, true, cx),
-                        Some(MouseButton::Right) => this.set_step(id, i, false, cx),
+                        Some(MouseButton::Left) => this.set_step(id, i, true, false, cx),
+                        Some(MouseButton::Right) => this.set_step(id, i, false, false, cx),
                         _ => {}
                     })),
             );
