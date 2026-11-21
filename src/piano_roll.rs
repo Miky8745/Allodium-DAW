@@ -1174,6 +1174,55 @@ impl PianoRoll {
         cx.notify();
     }
 
+    /// A numbered ruler above the grid — Allodium-tauri's own Playlist
+    /// ruler (`playlist.rs`'s own `render`, numbering its bold per-bar
+    /// gridlines). The grid itself still bands light/dark every beat (4
+    /// steps, `paint_grid`'s "Beat-group column banding"), but the
+    /// numbers label *bars* (`beats_per_bar` beats each — the project's
+    /// own time signature, same as the Playlist's own bars), one per bar
+    /// at its first beat, not one per beat. Only the bars actually in
+    /// view get a label, same virtualization the banding itself and the
+    /// Playlist's own ruler both already use.
+    fn render_beat_ruler(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        const RULER_H: f32 = 18.0;
+        const STEPS_PER_BEAT: i32 = 4;
+        let beats_per_bar = (self.channel_rack.read(cx).beats_per_bar() as i32).max(1);
+
+        let viewport_w = f32::from(self.grid_size.get().width).max(0.0);
+        let first_step = (self.scroll_x / STEP_W).floor().max(0.0) as i32;
+        let last_step = ((self.scroll_x + viewport_w) / STEP_W).ceil() as i32;
+        let first_bar = first_step / STEPS_PER_BEAT / beats_per_bar;
+        let last_bar = last_step / STEPS_PER_BEAT / beats_per_bar;
+
+        let mut labels = div().absolute().left_0().top_0().size_full();
+        for bar in first_bar..=last_bar {
+            let x = step_to_x((bar * beats_per_bar * STEPS_PER_BEAT) as f64) - self.scroll_x;
+            labels = labels.child(
+                div()
+                    .absolute()
+                    .left(px(x + 3.0))
+                    .top_0()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .text_size(px(9.0))
+                    .text_color(theme::accent_dim())
+                    .child(format!("{}", bar + 1)),
+            );
+        }
+
+        div()
+            .h(px(RULER_H))
+            .w_full()
+            .flex_shrink_0()
+            .relative()
+            .overflow_hidden()
+            .bg(theme::HEADER_BG)
+            .border_b_1()
+            .border_color(theme::BORDER)
+            .child(labels)
+    }
+
     /// A thin draggable horizontal scrollbar for the grid, below it —
     /// the grid's own content is painted procedurally in a `canvas`
     /// (`paint_grid`), not laid out as real wide DOM content GPUI could
@@ -1468,6 +1517,7 @@ impl Render for PianoRoll {
                             .flex()
                             .flex_col()
                             .overflow_hidden()
+                            .child(self.render_beat_ruler(cx))
                             .child(
                                 div()
                                     .flex_1()
