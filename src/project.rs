@@ -314,12 +314,95 @@ fn validate_project_name(name: &str) -> Result<&str, String> {
     Ok(clean)
 }
 
-/// `~/.local/share/allodium/projects` on Linux. Native app, no IPC
-/// boundary to cross, so this is a plain function rather than a
-/// `#[tauri::command]`.
+/// `data/projects`, relative to the repo root — same convention
+/// `file_browser.rs`'s own `DATA_ROOT` uses (this only works because
+/// `nix-shell --run "cargo run"`, this repo's only supported way to
+/// launch, always runs from there). Moved here from
+/// `~/.local/share/allodium/projects` so a project's files sit next to
+/// `data/samples`/`data/plugins` and show up in the File Browser's own
+/// "projects" tab, and so the startup project menu (`src/startup.rs`) can
+/// list/create/delete them without touching `$HOME`.
 pub fn projects_root() -> Result<std::path::PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
-    Ok(std::path::PathBuf::from(home).join(".local/share/allodium/projects"))
+    Ok(std::path::PathBuf::from("data/projects"))
+}
+
+/// Every project folder under `projects_root()` that actually has a
+/// `<name>.alp` save file in it — i.e. real projects, not an empty
+/// directory left behind by some other process. Sorted for a stable,
+/// predictable startup-menu order.
+pub fn list_projects() -> Result<Vec<String>, String> {
+    let root = projects_root()?;
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&root).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else { continue };
+        if entry.path().join(format!("{name}.{PROJECT_EXT}")).is_file() {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// A plain marker file recording which project was open last, next to
+/// `projects_root()` itself (not inside it, so it never gets mistaken for
+/// a project folder by `list_projects`). Backs the "auto-open the last
+/// project" startup behavior (`src/startup.rs`'s `AppRoot::new`) — just
+/// the project's own name, nothing else.
+fn last_opened_marker() -> std::path::PathBuf {
+    std::path::PathBuf::from("data/.last_project")
+}
+
+/// The project to skip the startup menu for, if any: whatever
+/// `record_last_opened` last wrote, as long as that project still
+/// actually exists (a deleted project's name left behind in the marker
+/// falls through to showing the menu instead, same as a first run).
+pub fn last_opened_project() -> Option<String> {
+    let name = std::fs::read_to_string(last_opened_marker()).ok()?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    list_projects().ok()?.into_iter().find(|p| *p == name)
+}
+
+/// Called every time a project is actually opened (both "Open" and
+/// "New Project" in the startup menu funnel into the same `AppRoot::
+/// open_project`) — best-effort, since failing to remember the last
+/// project just means the next launch shows the menu instead of
+/// skipping it, not real data loss.
+pub fn record_last_opened(name: &str) {
+    let _ = std::fs::create_dir_all("data");
+    let _ = std::fs::write(last_opened_marker(), name);
+}
+
+/// Creates a brand-new, empty project on disk under `name` so it shows up
+/// in `list_projects()` immediately — the startup menu's "New Project"
+/// flow calls this then opens the same name, rather than opening an
+/// in-memory `ProjectFile::default()` that wouldn't exist on disk until
+/// the first autosave. Errors if a project with that name already exists,
+/// rather than silently overwriting it.
+pub fn create_project(name: &str) -> Result<(), String> {
+    let clean = validate_project_name(name)?;
+    let path = projects_root()?.join(clean).join(format!("{clean}.{PROJECT_EXT}"));
+    if path.exists() {
+        return Err(format!("A project named \"{clean}\" already exists"));
+    }
+    save_project(clean, &ProjectFile::default())
+}
+
+/// Deletes a project's entire folder (its `.alp` save file and anything
+/// else saved alongside it) from `projects_root()`.
+pub fn delete_project(name: &str) -> Result<(), String> {
+    let clean = validate_project_name(name)?;
+    let dir = projects_root()?.join(clean);
+    if dir.is_dir() {
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 pub fn save_project(name: &str, project: &ProjectFile) -> Result<(), String> {

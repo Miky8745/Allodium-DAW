@@ -11,6 +11,7 @@ mod preferences;
 mod project;
 mod sample_downloader;
 mod shell;
+mod startup;
 mod theme;
 mod toolbar;
 mod widgets;
@@ -21,7 +22,7 @@ use std::time::Duration;
 use gpui::{App, Bounds, KeyBinding, WindowBounds, WindowOptions, prelude::*, px, size};
 
 use audio::AudioEngine;
-use shell::AppShell;
+use startup::AppRoot;
 use toolbar::TogglePlayback;
 
 fn main() {
@@ -75,8 +76,8 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let app_shell = cx.new(|cx| AppShell::new(engine, window, cx));
-                    cx.new(|cx| gpui::base::Root::new(app_shell, window, cx))
+                    let app_root = cx.new(|cx| AppRoot::new(engine, window, cx));
+                    cx.new(|cx| gpui::base::Root::new(app_root, window, cx))
                 },
             )
             .unwrap();

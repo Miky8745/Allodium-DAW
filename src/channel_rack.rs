@@ -76,7 +76,6 @@ pub enum ChannelRackEvent {
 
 impl EventEmitter<ChannelRackEvent> for ChannelRack {}
 
-const PROJECT_NAME: &str = "default";
 const DIAL_SENSITIVITY: f32 = 150.0; // matches Allodium-tauri's Dial.svelte
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -87,6 +86,10 @@ enum RackFilter {
 
 pub struct ChannelRack {
     engine: Arc<AudioEngine>,
+    /// Which `data/projects/<name>` folder `save`/the constructor's own
+    /// `project::load_project` call read from — chosen in the startup
+    /// project menu (`src/startup.rs`), not a hardcoded constant anymore.
+    project_name: String,
     project: ProjectFile,
     samples: std::collections::HashMap<String, Arc<SampleBuffer>>,
     next_channel_id: u32,
@@ -155,11 +158,16 @@ pub struct ChannelRack {
     /// can't otherwise tell "painting steps" apart from "some other drag,
     /// physically over the steps right now".
     painting_step: bool,
+    /// File → Autosave (`toolbar::file_menu`) — on by default, matching
+    /// this module's own prior behavior of writing to disk after every
+    /// edit. See `save`/`save_now`'s own doc comments for what turning it
+    /// off actually changes.
+    autosave: bool,
 }
 
 impl ChannelRack {
-    pub fn new(engine: Arc<AudioEngine>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let project = project::load_project(PROJECT_NAME).ok().flatten().unwrap_or_default();
+    pub fn new(engine: Arc<AudioEngine>, project_name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let project = project::load_project(&project_name).ok().flatten().unwrap_or_default();
 
         let mut samples = std::collections::HashMap::new();
         for ch in &project.channels.items {
@@ -189,6 +197,7 @@ impl ChannelRack {
 
         let mut rack = Self {
             engine,
+            project_name,
             project,
             samples,
             next_channel_id,
@@ -215,6 +224,7 @@ impl ChannelRack {
             held_pitches: HashSet::new(),
             steps_scroll: gpui::ScrollHandle::new(),
             painting_step: false,
+            autosave: true,
         };
         rack.push_snapshot();
         rack
@@ -230,9 +240,38 @@ impl ChannelRack {
         self.engine.set_mixer(buses, master_volume);
     }
 
+    /// Called after every mutating edit throughout this module and its
+    /// submodules. Writes to disk only when `autosave` is on (File →
+    /// Autosave, `toolbar::file_menu`) — with it off, edits stay in
+    /// memory until `save_now` runs them through explicitly (File → Save,
+    /// or quitting via File → Exit).
     fn save(&self) {
-        if let Err(e) = project::save_project(PROJECT_NAME, &self.project) {
+        if self.autosave {
+            self.save_now();
+        }
+    }
+
+    /// Writes to disk unconditionally, bypassing the `autosave` flag —
+    /// File → Save's own handler, and the fallback this app's own exit
+    /// path (`toolbar::file_menu`'s Exit item) runs so a session with
+    /// autosave off still doesn't lose its last edits on quit.
+    pub(crate) fn save_now(&self) {
+        if let Err(e) = project::save_project(&self.project_name, &self.project) {
             eprintln!("[channel rack] save failed: {e}");
+        }
+    }
+
+    pub(crate) fn autosave(&self) -> bool {
+        self.autosave
+    }
+
+    pub(crate) fn set_autosave(&mut self, on: bool) {
+        self.autosave = on;
+        if on {
+            // Catches up on whatever changed while it was off, rather
+            // than silently leaving the on-disk file stale until the
+            // next edit.
+            self.save_now();
         }
     }
 

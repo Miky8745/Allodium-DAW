@@ -138,8 +138,8 @@ struct TempoDrag {
 }
 
 impl AppShell {
-    pub fn new(engine: Arc<AudioEngine>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let channel_rack = cx.new(|cx| ChannelRack::new(engine, window, cx));
+    pub fn new(engine: Arc<AudioEngine>, project_name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let channel_rack = cx.new(|cx| ChannelRack::new(engine, project_name, window, cx));
         cx.subscribe(&channel_rack, |this: &mut Self, _rack, event: &crate::channel_rack::ChannelRackEvent, cx| match event {
             crate::channel_rack::ChannelRackEvent::HoverInfo(name, value) => {
                 this.toolbar.hover = Some((name, value.clone()));

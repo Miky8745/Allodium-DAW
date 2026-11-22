@@ -55,6 +55,7 @@ use gpui::{
     BoxShadow, ClickEvent, Context, Hsla, IntoElement, MouseButton, MouseDownEvent, Modifiers,
     ParentElement, ScrollEvent, Styled, Window, actions, div, point, prelude::*, px,
 };
+use crate::channel_rack::ChannelRack;
 use crate::floating_panel::{self, PanelKind, ShellDragMarker};
 use crate::preferences;
 use crate::shell::AppShell;
@@ -497,11 +498,41 @@ fn vsep() -> impl IntoElement {
     Separator::vertical().h(px(22.0)).w(px(1.0)).mx_2()
 }
 
-/// The one real menu in the File/Edit/View/… row — a dropdown with a
-/// single "Preferences…" item that opens the in-app Preferences dialog
-/// (`src/preferences.rs`). The rest of the row stays inert text (no
-/// backend behind them yet), so only this one label gets the quiet
-/// ghost-button treatment that makes it look (and act) clickable.
+/// File → Autosave (checkable, toggles `ChannelRack::set_autosave`) and
+/// File → Exit (flushes to disk via `save_now` regardless of the
+/// Autosave setting, then quits the app — so turning Autosave off never
+/// costs the last few edits on the way out).
+fn file_menu(channel_rack: gpui::Entity<ChannelRack>) -> impl IntoElement {
+    Button::new("menu-file")
+        .ghost()
+        .compact()
+        .text_size(px(11.0))
+        .text_color(theme::accent_dim().alpha(0.7))
+        .label("File")
+        .dropdown_menu(move |menu, _, cx| {
+            let rack = channel_rack.clone();
+            let autosave = channel_rack.read(cx).autosave();
+            menu.item(PopupMenuItem::new("Save").icon(IconName::Save).on_click({
+                let rack = rack.clone();
+                move |_, _, cx| rack.update(cx, |cr, _| cr.save_now())
+            }))
+            .item(PopupMenuItem::new("Autosave").checked(autosave).on_click({
+                let rack = rack.clone();
+                move |_, _, cx| rack.update(cx, |cr, _| cr.set_autosave(!cr.autosave()))
+            }))
+            .separator()
+            .item(PopupMenuItem::new("Exit").icon(IconName::LogOut).on_click(move |_, _, cx| {
+                rack.update(cx, |cr, _| cr.save_now());
+                cx.quit();
+            }))
+        })
+}
+
+/// The one real "Preferences…" menu in the File/Edit/View/… row — a
+/// dropdown that opens the in-app Preferences dialog (`src/
+/// preferences.rs`). The rest of the row stays inert text (no backend
+/// behind them yet), so only File and Edit get the quiet ghost-button
+/// treatment that makes them look (and act) clickable.
 fn edit_menu(prefs: gpui::Entity<preferences::Preferences>) -> impl IntoElement {
     Button::new("menu-edit")
         .ghost()
@@ -759,12 +790,10 @@ impl AppShell {
                                             .child("Allodium"),
                                     ),
                             )
-                            .children(MENU_LABELS.map(|label| {
-                                if label == "Edit" {
-                                    edit_menu(self.preferences.clone()).into_any_element()
-                                } else {
-                                    div().text_size(px(11.0)).text_color(theme::BTN_TEXT).child(label).into_any_element()
-                                }
+                            .children(MENU_LABELS.map(|label| match label {
+                                "File" => file_menu(self.channel_rack.clone()).into_any_element(),
+                                "Edit" => edit_menu(self.preferences.clone()).into_any_element(),
+                                _ => div().text_size(px(11.0)).text_color(theme::BTN_TEXT).child(label).into_any_element(),
                             })),
                     )
                     .child(vsep())
