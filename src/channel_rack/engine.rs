@@ -93,9 +93,13 @@ impl ChannelRack {
         self.engine.song_step()
     }
 
-    /// The Playlist ruler's click-to-seek — moves the playhead without
-    /// otherwise touching transport state.
-    pub fn seek_song_to_step(&self, step: f64) {
+    /// Ruler click-to-seek, shared by the Playlist (song-mode steps) and
+    /// the Piano Roll (pattern-mode steps) — moves the playhead without
+    /// otherwise touching transport state. Mode-agnostic because both
+    /// `song_step()` and `current_step()` read the same underlying
+    /// `samples_played` clock this just writes to
+    /// (`AudioEngine::seek_to_step`'s own doc comment).
+    pub fn seek_transport_to_step(&self, step: f64) {
         self.engine.seek_to_step(step);
     }
 

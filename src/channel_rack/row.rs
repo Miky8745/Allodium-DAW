@@ -26,6 +26,12 @@ fn next_note_id(notes: &[Note]) -> u32 {
     notes.iter().map(|n| n.id).max().unwrap_or(0) + 1
 }
 
+/// The step sequencer's own per-step cell width, shared with
+/// `render_piano_preview`'s `CELL_W` so a piano-roll-authored channel's
+/// mini preview still lines up step-for-step with a real step row above/
+/// below it in the same rack.
+const STEP_CELL_W: f32 = 10.0;
+
 /// Whether a step-shaped note (the step sequencer's own domain: fixed
 /// pitch, exactly one step long) sits at `step` — used both to light up
 /// the step button and to find/remove it on toggle-off. Doesn't touch an
@@ -81,7 +87,7 @@ fn is_piano_roll_authored(notes: &[Note]) -> bool {
 /// keyboard) padded to at least an octave, so a single held note still
 /// draws as a visible bar instead of a hairline pinned to one edge.
 fn render_piano_preview(id: u32, notes: &[Note], step_count: usize, current_step: f64) -> Div {
-    const CELL_W: f32 = 20.0;
+    const CELL_W: f32 = STEP_CELL_W;
     const GAP: f32 = 4.0;
     const ROW_H: f32 = 28.0;
     const NOTE_H: f32 = 3.0;
@@ -445,7 +451,7 @@ impl ChannelRack {
             step_row = step_row.child(
                 div()
                     .id(("step", (id as usize) * 100 + i))
-                    .w(px(20.0))
+                    .w(px(STEP_CELL_W))
                     .h(px(28.0))
                     .rounded(theme::RADIUS_XS)
                     .bg(bg)

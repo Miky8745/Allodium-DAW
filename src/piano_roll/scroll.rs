@@ -3,7 +3,7 @@
 //! numbered ruler above it, and the overview/minimap strip above that.
 //! See `piano_roll.rs`'s own top doc comment for why these exist.
 
-use gpui::{Context, IntoElement, MouseDownEvent, ParentElement, Styled, div, prelude::*, px};
+use gpui::{Context, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Styled, div, prelude::*, px};
 
 use crate::theme;
 
@@ -198,6 +198,21 @@ impl PianoRoll {
         )
     }
 
+    /// Piano Roll ruler click-to-seek — the same gesture the Playlist's
+    /// own ruler click-to-seek uses (`playlist.rs`'s `handle_ruler_click`),
+    /// moving the playhead to wherever was clicked. Unlike the Playlist's
+    /// version this isn't gated on a transport mode: `current_step()` (what
+    /// this grid's own playhead and the Channel Rack's step highlight both
+    /// read) is always meaningful, pattern-mode or song-mode alike, since
+    /// it's the same wrapped `samples_played` clock either way
+    /// (`ChannelRack::seek_transport_to_step`'s own doc comment).
+    fn handle_ruler_click(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let x = f32::from(position.x - self.grid_origin.get().x) + self.scroll_x;
+        let step = (x / STEP_W).max(0.0) as f64;
+        self.channel_rack.update(cx, |rack, _| rack.seek_transport_to_step(step));
+        cx.notify();
+    }
+
     /// A numbered ruler above the grid — Allodium-tauri's own Playlist
     /// ruler (`playlist.rs`'s own `render`, numbering its bold per-bar
     /// gridlines). The grid itself still bands light/dark every beat (4
@@ -240,9 +255,11 @@ impl PianoRoll {
             .flex_shrink_0()
             .relative()
             .overflow_hidden()
+            .cursor_pointer()
             .bg(theme::HEADER_BG)
             .border_b_1()
             .border_color(theme::BORDER)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.handle_ruler_click(ev.position, cx)))
             .child(labels)
     }
 

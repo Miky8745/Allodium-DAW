@@ -311,7 +311,7 @@ impl Playlist {
         }
         let x = f32::from(position.x - self.grid_origin.get().x) + self.scroll_x;
         let beat = (x / BEAT_W).max(0.0) as f64;
-        self.channel_rack.update(cx, |rack, _| rack.seek_song_to_step(beat * 4.0));
+        self.channel_rack.update(cx, |rack, _| rack.seek_transport_to_step(beat * 4.0));
         cx.notify();
     }
 
