@@ -219,7 +219,9 @@ impl PianoRoll {
                     match hit {
                         Some(idx) if on_resize_edge => {
                             let note = &self.notes[idx];
+                            let pitch = note.pitch;
                             self.drag = DragMode::Resizing { note_id: note.id, anchor_step: step, orig_length: note.length };
+                            self.begin_live_preview(channel_id, pitch, cx);
                         }
                         Some(idx) => {
                             let note_id = self.notes[idx].id;
@@ -245,6 +247,12 @@ impl PianoRoll {
                                 anchor_initial_pitch,
                                 initial_positions,
                             };
+                            // Clicking (as opposed to placing) an existing
+                            // note is the "point at a note, hear and see
+                            // it" gesture — light up the key it belongs to
+                            // on the real piano sidebar and sound it,
+                            // mirroring a real piano key being pressed.
+                            self.begin_live_preview(channel_id, anchor_initial_pitch, cx);
                         }
                         None => {
                             // Draw tool, empty space: clears the selection
@@ -331,6 +339,7 @@ impl PianoRoll {
     }
 
     pub(super) fn end_drag(&mut self, cx: &mut Context<Self>) {
+        self.end_live_preview(cx);
         if self.drag == DragMode::None {
             return;
         }
@@ -341,6 +350,25 @@ impl PianoRoll {
         }
         self.drag = DragMode::None;
         self.channel_rack.update(cx, |rack, _| rack.persist());
+    }
+
+    /// Clicking an existing note (move or resize grab) sounds it and lights
+    /// its key on the piano sidebar, reusing the QWERTY-piano plumbing
+    /// (`ChannelRack::live_note_on`/`held_pitches`) rather than a separate
+    /// one-shot preview path, so the key glow and the note-off both come
+    /// for free. `live_preview_pitch` remembers which pitch to release,
+    /// since a drag can carry the note to a different pitch than it
+    /// started at before the mouse button comes back up.
+    fn begin_live_preview(&mut self, channel_id: u32, pitch: i32, cx: &mut Context<Self>) {
+        self.end_live_preview(cx);
+        self.channel_rack.update(cx, |cr, cx| cr.live_note_on(channel_id, pitch, cx));
+        self.live_preview_pitch = Some(pitch);
+    }
+
+    pub(super) fn end_live_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(pitch) = self.live_preview_pitch.take() {
+            self.channel_rack.update(cx, |cr, cx| cr.live_note_off(pitch, cx));
+        }
     }
 
     fn delete_at(&mut self, step: f64, pitch: i32) {

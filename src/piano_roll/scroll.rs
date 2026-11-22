@@ -9,6 +9,14 @@ use crate::theme;
 
 use super::{PianoRoll, PITCH_COUNT, STEP_W, step_to_x};
 
+/// Height of the overview strip (`render_overview`), shared with
+/// `piano_roll.rs`'s own header-spacer above the piano-keys sidebar — see
+/// that spacer's doc comment for why it has to match this exactly.
+pub(super) const OVERVIEW_H: f32 = 26.0;
+/// Height of the bar-numbered ruler (`render_beat_ruler`), same sharing
+/// reason as `OVERVIEW_H` above.
+pub(super) const RULER_H: f32 = 18.0;
+
 /// Drag state for the horizontal scrollbar's thumb (`render_h_scrollbar`)
 /// — tracked at the root level the same way `properties::ParamDrag` is,
 /// since a drag has to keep updating even once the cursor leaves the
@@ -130,7 +138,6 @@ impl PianoRoll {
     /// backdrop instead of a bare track, for VS Code-minimap-style
     /// at-a-glance navigation in a long pattern.
     pub(super) fn render_overview(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        const OVERVIEW_H: f32 = 26.0;
         const NOTE_H: f32 = 3.0;
 
         let geo = self.h_scroll_geometry();
@@ -201,7 +208,6 @@ impl PianoRoll {
     /// view get a label, same virtualization the banding itself and the
     /// Playlist's own ruler both already use.
     pub(super) fn render_beat_ruler(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        const RULER_H: f32 = 18.0;
         const STEPS_PER_BEAT: i32 = 4;
         let beats_per_bar = (self.channel_rack.read(cx).beats_per_bar() as i32).max(1);
 

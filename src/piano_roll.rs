@@ -190,6 +190,10 @@ pub struct PianoRoll {
     param_drag: Option<ParamDrag>,
     h_scroll_drag: Option<HScrollDrag>,
     dying: Vec<DyingNote>,
+    /// The pitch a note click lit up and sounded via
+    /// `interaction::begin_live_preview`, remembered so `end_drag`/mouse-up
+    /// knows which key to release — see that function's own doc comment.
+    live_preview_pitch: Option<i32>,
     /// The grid canvas's own on-screen origin, captured from its `canvas`
     /// paint closure each frame. Plain `div()`s don't hand their own
     /// screen bounds to mouse-event handlers (only `canvas`'s prepaint/
@@ -232,6 +236,7 @@ impl PianoRoll {
             param_drag: None,
             h_scroll_drag: None,
             dying: Vec::new(),
+            live_preview_pitch: None,
             grid_origin: Rc::new(Cell::new(point(px(0.0), px(0.0)))),
             grid_size: Rc::new(Cell::new(size(px(0.0), px(0.0)))),
         }
@@ -437,7 +442,24 @@ impl Render for PianoRoll {
                     .flex()
                     .overflow_hidden()
                     .when(self.show_note_props, |d| d.child(self.render_note_properties(cx)))
-                    .child(paint::piano_keys(self.scroll_y, self.channel_rack.read(cx).held_pitches()))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .h_full()
+                            .flex_shrink_0()
+                            // The keys sidebar scrolls in lockstep with the
+                            // grid's rows, but the grid sits below the
+                            // overview strip + bar ruler while this column
+                            // fills the whole panel height from the top —
+                            // without reserving that same height here first,
+                            // every key row renders `OVERVIEW_H + RULER_H`
+                            // (44px, ~2.4 rows) higher than the grid row it's
+                            // supposed to label, making notes look rendered
+                            // too low relative to the keys beside them.
+                            .child(div().h(px(scroll::OVERVIEW_H + scroll::RULER_H)).w_full().flex_shrink_0().bg(theme::HEADER_BG))
+                            .child(paint::piano_keys(self.scroll_y, self.channel_rack.read(cx).held_pitches())),
+                    )
                     .child(
                         div()
                             .flex_1()

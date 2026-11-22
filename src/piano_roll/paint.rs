@@ -89,7 +89,7 @@ pub(super) fn piano_keys(scroll_y: f32, held: &HashSet<i32>) -> impl IntoElement
     div()
         .id("piano-keys")
         .w(px(KEY_COL_W))
-        .h_full()
+        .flex_1()
         .flex_shrink_0()
         .overflow_hidden()
         .bg(theme::PIANO_KEY_WHITE)
