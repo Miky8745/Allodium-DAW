@@ -18,8 +18,10 @@
 //! onto a channel," now actually drag/drop, not just the `rfd` file
 //! picker that was the only way in before this panel existed.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gpui::assets::IconName;
 use gpui::component::list::ListItem;
@@ -31,6 +33,7 @@ use gpui::{
     Styled, Window, div, prelude::*, px,
 };
 
+use crate::audio::{self, AudioEngine, SampleBuffer};
 use crate::sample_downloader::{DownloadState, SampleDownloader};
 use crate::theme;
 
@@ -127,6 +130,11 @@ fn scan_dir(path: &Path) -> Vec<TreeItem> {
 }
 
 pub struct FileBrowser {
+    engine: Arc<AudioEngine>,
+    /// Decoded samples previewed by clicking an audio-file leaf, keyed by
+    /// absolute path — kept around so re-clicking the same file doesn't
+    /// re-decode it, same caching shape `ChannelRack::cache_sample` uses.
+    samples: HashMap<String, Arc<SampleBuffer>>,
     /// (tab label, absolute directory it roots) — one per direct child
     /// directory of `data/`, in alphabetical order.
     tabs: Vec<(String, PathBuf)>,
@@ -139,7 +147,7 @@ pub struct FileBrowser {
 }
 
 impl FileBrowser {
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(engine: Arc<AudioEngine>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         ensure_data_folders();
         let mut tabs: Vec<(String, PathBuf)> = fs::read_dir(DATA_ROOT)
             .ok()
@@ -153,7 +161,33 @@ impl FileBrowser {
 
         let tree = cx.new(|cx| TreeState::new(cx).items(tabs.first().map(|(_, path)| scan_dir(path)).unwrap_or_default()));
 
-        Self { tabs, selected_tab: 0, tree, downloader: None, download_message: None }
+        Self { engine, samples: HashMap::new(), tabs, selected_tab: 0, tree, downloader: None, download_message: None }
+    }
+
+    /// Plays an audio-file leaf's sample straight through, once, at the
+    /// same default volume/pan a freshly added Channel Rack channel gets
+    /// (`Channel::volume`/`pan`'s own defaults) — there's no channel here
+    /// to read real levels from, just a quick "what does this sound
+    /// like" audition. Decoding failures are silently ignored, matching
+    /// `ChannelRack::audition`'s own "no sample, no sound" shape rather
+    /// than surfacing a dialog for what's just a preview click.
+    fn play_sample(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let path_str = path.to_string_lossy().to_string();
+        let sample = match self.samples.get(&path_str) {
+            Some(sample) => sample.clone(),
+            None => match audio::decode_sample(path) {
+                Ok(sample) => {
+                    self.samples.insert(path_str, sample.clone());
+                    sample
+                }
+                Err(e) => {
+                    eprintln!("[file browser] couldn't decode {}: {e}", path.display());
+                    return;
+                }
+            },
+        };
+        self.engine.preview(sample, 0.8, 0.5);
+        cx.notify();
     }
 
     fn select_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -264,21 +298,32 @@ impl FileBrowser {
 }
 
 /// `depth` indents nested entries; the folder/file glyph swaps to an open
-/// folder once expanded, matching VS Code's own explorer affordance.
-/// Audio-file leaves are drag sources (see `SampleDragPayload`) so they
-/// can be dropped straight onto a Channel Rack row.
-fn render_entry(ix: usize, entry: &gpui::component::tree::TreeEntry, selected: bool, _window: &mut Window, _cx: &mut App) -> ListItem {
+/// folder once expanded, matching VS Code's own explorer affordance. An
+/// audio-file leaf gets a waveform glyph instead of the plain file icon,
+/// is a drag source (see `SampleDragPayload`) so it can be dropped
+/// straight onto a Channel Rack row, and a click plays it through
+/// `browser.play_sample` as a quick audition.
+fn render_entry(
+    ix: usize,
+    entry: &gpui::component::tree::TreeEntry,
+    selected: bool,
+    browser: &Entity<FileBrowser>,
+    _window: &mut Window,
+    _cx: &mut App,
+) -> ListItem {
     let depth = entry.depth();
     let is_folder = entry.is_folder();
+    let path = PathBuf::from(entry.item().id.as_ref());
+    let is_audio = !is_folder && is_audio_file(&path);
     let icon = if is_folder {
         if entry.is_expanded() { IconName::FolderOpen } else { IconName::Folder }
+    } else if is_audio {
+        IconName::AudioWaveform
     } else {
         IconName::File
     };
-    let icon_color = if is_folder { theme::accent_dim() } else { theme::BTN_TEXT };
-    let path = PathBuf::from(entry.item().id.as_ref());
+    let icon_color = if is_folder { theme::accent_dim() } else if is_audio { IDENTITY_COLOR } else { theme::BTN_TEXT };
     let label = entry.item().label.clone();
-    let draggable = !is_folder && is_audio_file(&path);
 
     let mut item = ListItem::new(("file-browser-entry", ix))
         .selected(selected)
@@ -293,11 +338,16 @@ fn render_entry(ix: usize, entry: &gpui::component::tree::TreeEntry, selected: b
                 .child(div().text_size(px(12.0)).text_color(theme::MAIN_TEXT).child(label.clone())),
         );
 
-    if draggable {
+    if is_audio {
         let path_str = path.to_string_lossy().to_string();
         item = item
             .cursor(CursorStyle::OpenHand)
             .on_drag(SampleDragPayload { path: path_str, label: label.to_string() }, sample_drag_preview);
+
+        let browser = browser.clone();
+        item = item.on_click(move |_, _window, cx| {
+            browser.update(cx, |this, cx| this.play_sample(&path, cx));
+        });
     }
 
     item
@@ -343,6 +393,13 @@ impl Render for FileBrowser {
             root = root.child(self.render_download_bar(cx));
         }
 
-        root.child(div().flex_1().w_full().overflow_hidden().child(tree(&self.tree, render_entry)))
+        let browser = cx.entity();
+        root.child(
+            div()
+                .flex_1()
+                .w_full()
+                .overflow_hidden()
+                .child(tree(&self.tree, move |ix, entry, selected, window, cx| render_entry(ix, entry, selected, &browser, window, cx))),
+        )
     }
 }

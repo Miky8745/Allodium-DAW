@@ -139,7 +139,7 @@ struct TempoDrag {
 
 impl AppShell {
     pub fn new(engine: Arc<AudioEngine>, project_name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let channel_rack = cx.new(|cx| ChannelRack::new(engine, project_name, window, cx));
+        let channel_rack = cx.new(|cx| ChannelRack::new(engine.clone(), project_name, window, cx));
         cx.subscribe(&channel_rack, |this: &mut Self, _rack, event: &crate::channel_rack::ChannelRackEvent, cx| match event {
             crate::channel_rack::ChannelRackEvent::HoverInfo(name, value) => {
                 this.toolbar.hover = Some((name, value.clone()));
@@ -154,7 +154,7 @@ impl AppShell {
         let piano_roll = cx.new(|cx| PianoRoll::new(channel_rack.clone(), window, cx));
         let playlist = cx.new(|cx| Playlist::new(channel_rack.clone(), window, cx));
         let mixer = cx.new(|cx| Mixer::new(channel_rack.clone(), window, cx));
-        let file_browser = cx.new(|cx| FileBrowser::new(window, cx));
+        let file_browser = cx.new(|cx| FileBrowser::new(engine, window, cx));
         let preferences = cx.new(|_| Preferences::new());
         let tempo_input = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe(&tempo_input, |this: &mut Self, _input, event: &InputEvent, cx| match event {
